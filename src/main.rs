@@ -454,7 +454,37 @@ async fn main() -> anyhow::Result<()> {
         },
     ));
 
-    // todo announce on gossip
+    // Regularly broadcast our node_announcement. This is only required (or possible) if we have
+    // some public channels.
+    let peer_man = Arc::clone(&peer_manager);
+    let chan_man = Arc::clone(&channel_manager);
+    let mut alias: [u8; 32] = [0; 32];
+    let bytes = config
+        .alias
+        .as_deref()
+        .unwrap_or("Rust Lightning Daemon")
+        .as_bytes();
+    let len = bytes.len().min(alias.len());
+    alias[..len].copy_from_slice(&bytes[..len]);
+    let list_address = config.list_address();
+    tokio::spawn(async move {
+        let list_addresses = list_address.map(|addr| vec![addr]).unwrap_or_default();
+        // First wait a minute until we have some peers and maybe have opened a channel.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        // Then, update our announcement once an hour to keep it fresh but avoid unnecessary churn
+        // in the global gossip network.
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            // Don't bother trying to announce if we don't have any public channels, though our
+            // peers should drop such an announcement anyway. Note that announcement may not
+            // propagate until we have a channel with 6+ confirmations.
+            if chan_man.list_channels().iter().any(|chan| chan.is_public) {
+                peer_man.broadcast_node_announcement([0; 3], alias, list_addresses.clone());
+            }
+        }
+    });
+
     // todo pending sweeps
     // todo reconnect to peers
 

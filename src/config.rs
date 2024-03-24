@@ -1,4 +1,6 @@
 use clap::Parser;
+use lightning::ln::msgs::SocketAddress;
+use lightning::util::ser::Hostname;
 
 /// Rust Lightning Daemon
 #[derive(Parser, Debug, Clone)]
@@ -17,6 +19,13 @@ pub struct Config {
     /// Bitcoin network to use
     #[clap(default_value = "signet", long)]
     pub network: String,
+
+    /// Alias for the node
+    #[clap(long)]
+    pub alias: Option<String>,
+    /// IP address to advertise to the network
+    #[clap(long)]
+    pub external_ip: Option<String>,
 
     /// Bind address for the RPC server
     #[clap(default_value = "127.0.0.1", long)]
@@ -49,5 +58,14 @@ impl Config {
             "signet" => bitcoin::Network::Signet,
             _ => panic!("Invalid network"),
         }
+    }
+
+    pub fn list_address(&self) -> Option<SocketAddress> {
+        self.external_ip
+            .as_ref()
+            .map(|hostname| SocketAddress::Hostname {
+                hostname: Hostname::try_from(hostname.clone()).expect("invalid external ip"),
+                port: self.port,
+            })
     }
 }
