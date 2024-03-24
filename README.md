@@ -4,5 +4,4 @@
 ## TODO
 
 - [ ] RPC
-- [ ] On-Chain Wallet
 - [ ] Pending Sweeps

@@ -2,9 +2,13 @@ use crate::chain::TxBroadcaster;
 use crate::config::Config;
 use crate::events::EventHandler;
 use crate::fees::RldFeeEstimator;
+use crate::keys::KeysManager;
 use crate::logger::RldLogger;
 use crate::models::MIGRATIONS;
+use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
+use bip39::Mnemonic;
+use bitcoin::bip32::ExtendedPrivKey;
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::{BlockHash, Network};
@@ -16,15 +20,17 @@ use diesel_migrations::MigrationHarness;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::Event;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManagerReadArgs, SimpleArcChannelManager,
+    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs,
 };
-use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler, SimpleArcPeerManager};
-use lightning::onion_message::messenger::{DefaultMessageRouter, SimpleArcOnionMessenger};
+use lightning::ln::peer_handler::{
+    IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
+};
+use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::router::DefaultRouter;
-use lightning::routing::scoring::ProbabilisticScoringFeeParameters;
-use lightning::sign::{EntropySource, InMemorySigner, KeysManager};
+use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
+use lightning::sign::{EntropySource, InMemorySigner};
 use lightning::util::config::UserConfig;
 use lightning::util::logger::Logger;
 use lightning::util::persist;
@@ -49,8 +55,10 @@ mod chain;
 mod config;
 mod events;
 mod fees;
+mod keys;
 mod logger;
 mod models;
+mod onchain;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<RldLogger>>;
 
@@ -60,20 +68,45 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
     Arc<RldLogger>,
 >;
 
-pub(crate) type PeerManager = SimpleArcPeerManager<
+pub(crate) type PeerManager = LdkPeerManager<
     SocketDescriptor,
-    ChainMonitor,
-    TxBroadcaster,
-    RldFeeEstimator,
-    GossipVerifier,
-    RldLogger,
+    Arc<ChannelManager>,
+    Arc<P2PGossipSync<Arc<NetworkGraph>, GossipVerifier, Arc<RldLogger>>>,
+    Arc<OnionMessenger>,
+    Arc<RldLogger>,
+    IgnoringMessageHandler,
+    Arc<KeysManager>,
 >;
 
-type OnionMessenger =
-    SimpleArcOnionMessenger<ChainMonitor, TxBroadcaster, RldFeeEstimator, RldLogger>;
+type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
+    Arc<KeysManager>,
+    Arc<KeysManager>,
+    Arc<RldLogger>,
+    Arc<DefaultMessageRouter<Arc<NetworkGraph>, Arc<RldLogger>>>,
+    Arc<ChannelManager>,
+    IgnoringMessageHandler,
+>;
 
-pub(crate) type ChannelManager =
-    SimpleArcChannelManager<ChainMonitor, TxBroadcaster, RldFeeEstimator, RldLogger>;
+pub(crate) type Scorer = ProbabilisticScorer<Arc<NetworkGraph>, Arc<RldLogger>>;
+
+pub(crate) type Router = DefaultRouter<
+    Arc<NetworkGraph>,
+    Arc<RldLogger>,
+    Arc<RwLock<Scorer>>,
+    ProbabilisticScoringFeeParameters,
+    Scorer,
+>;
+
+pub(crate) type ChannelManager = LdkChannelManager<
+    Arc<ChainMonitor>,
+    Arc<TxBroadcaster>,
+    Arc<KeysManager>,
+    Arc<KeysManager>,
+    Arc<KeysManager>,
+    Arc<RldFeeEstimator>,
+    Arc<Router>,
+    Arc<RldLogger>,
+>;
 
 type ChainMonitor = chainmonitor::ChainMonitor<
     InMemorySigner,
@@ -138,12 +171,20 @@ async fn main() -> anyhow::Result<()> {
     let fee_estimator = Arc::new(RldFeeEstimator::new(bitcoind.clone())?);
     let broadcaster = Arc::new(TxBroadcaster::new(bitcoind.clone(), logger.clone()));
 
-    let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
-    let keys_manager = Arc::new(KeysManager::new(
-        &keys.seed,
-        cur.as_secs(),
-        cur.subsec_nanos(),
-    ));
+    let seed = keys.seed.to_seed_normalized("");
+    let xpriv = ExtendedPrivKey::new_master(network, &seed)?;
+
+    let wallet = Arc::new(OnChainWallet::new(
+        xpriv,
+        network,
+        &path.clone().join("bdk"),
+        fee_estimator.clone(),
+        logger.clone(),
+    )?);
+
+    wallet.start();
+
+    let keys_manager = Arc::new(KeysManager::new(xpriv, network, wallet, logger.clone())?);
 
     let ldk_data_dir = path.join("ldk");
     let fs_store = Arc::new(FilesystemStore::new(ldk_data_dir.clone()));
@@ -256,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
                 network,
                 best_block: polled_best_block,
             };
+            let cur = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
             let fresh_channel_manager = ChannelManager::new(
                 fee_estimator.clone(),
                 chain_monitor.clone(),
@@ -566,7 +608,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeysFile {
-    pub seed: [u8; 32],
+    pub seed: Mnemonic,
     pub network: Network,
 }
 
@@ -583,8 +625,9 @@ impl KeysFile {
             Err(e) => {
                 log_info!(logger, "Keys file not found, creating new one");
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    let mut seed = [0; 32];
-                    OsRng.fill_bytes(&mut seed);
+                    let mut entropy = [0; 32];
+                    OsRng.fill_bytes(&mut entropy);
+                    let seed = Mnemonic::from_entropy(&entropy)?;
                     let keys = KeysFile { seed, network };
                     fs::write(path, serde_json::to_string(&keys)?)?;
                     Ok(keys)

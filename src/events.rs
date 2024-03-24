@@ -1,4 +1,5 @@
 use crate::fees::RldFeeEstimator;
+use crate::keys::KeysManager;
 use crate::logger::RldLogger;
 use crate::models::invoice::Invoice;
 use crate::ChannelManager;
@@ -6,7 +7,6 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning::events::Event;
 use lightning::ln::PaymentPreimage;
-use lightning::sign::KeysManager;
 use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error};
 use std::sync::Arc;
