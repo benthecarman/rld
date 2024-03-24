@@ -2,7 +2,7 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::KeysManager;
 use crate::logger::RldLogger;
 use crate::models::invoice::Invoice;
-use crate::ChannelManager;
+use crate::node::ChannelManager;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning::events::Event;

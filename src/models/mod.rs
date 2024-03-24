@@ -1,5 +1,5 @@
 use crate::logger::RldLogger;
-use crate::NetworkGraph;
+use crate::node::NetworkGraph;
 use bitcoin::Network;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
