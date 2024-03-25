@@ -1,7 +1,11 @@
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::large_enum_variant)]
+
 use crate::config::Config;
 use crate::logger::RldLogger;
 use crate::models::MIGRATIONS;
 use crate::node::Node;
+use crate::proto::lightning_server::LightningServer;
 use bip39::Mnemonic;
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
@@ -13,11 +17,17 @@ use diesel_migrations::MigrationHarness;
 use lightning::util::logger::Logger;
 use lightning::{log_error, log_info};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::path::Path;
+use std::str::FromStr;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::oneshot;
+use tonic::transport::Server;
 
 mod chain;
+mod cli;
 mod config;
 mod events;
 mod fees;
@@ -26,6 +36,13 @@ mod logger;
 mod models;
 mod node;
 mod onchain;
+mod server;
+
+pub mod proto {
+    tonic::include_proto!("lnrpc");
+
+    pub(crate) const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("lightning");
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
     // Set up an oneshot channel to handle shutdown signal
     let (tx, rx) = oneshot::channel();
 
-    let node = Node::new(&config, db_pool.clone()).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let node = Node::new(&config, db_pool, stop.clone()).await?;
 
     // Spawn a task to listen for shutdown signals
     let l = node.logger.clone();
@@ -74,10 +92,27 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let _ = tx.send(());
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
     });
 
-    // wait for shutdown signal
-    rx.await?;
+    let service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build()?;
+
+    let socket_addr = SocketAddr::from_str(&format!("{}:{}", config.rpc_bind, config.rpc_port))?;
+    let server_node = node.clone();
+    Server::builder()
+        .accept_http1(true)
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .add_service(service)
+        .add_service(tonic_web::enable(LightningServer::new(server_node.clone())))
+        // .add_service(AdminServer::with_interceptor(admin, check_auth))
+        .serve_with_shutdown(socket_addr, async move {
+            if let Err(e) = rx.await {
+                log_error!(server_node.logger, "Error receiving shutdown signal: {e}");
+            }
+        })
+        .await?;
 
     node.stop().await?;
 

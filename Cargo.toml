@@ -7,11 +7,14 @@ edition = "2021"
 name = "rld"
 path = "src/main.rs"
 
+[[bin]]
+name = "rlcli"
+path = "src/cli.rs"
+
 [dependencies]
 log = "0.4.18"
 pretty_env_logger = "0.5.0"
 anyhow = "1.0"
-axum = "0.6.20"
 bip39 = { version = "2.0.0", features = ["serde"] }
 bitcoin = "0.30.2"
 chrono = { version = "0.4.26", features = ["serde"] }
@@ -34,3 +37,12 @@ base64 = "0.13.1"
 bdk = "1.0.0-alpha.7"
 bdk_file_store = "0.7.0"
 bdk_bitcoind_rpc = "0.6.0"
+
+tonic = "0.11"
+prost = "0.12"
+tonic-web = "0.11"
+tonic-reflection = "0.11"
+tower-http = "0.4"
+
+[build-dependencies]
+tonic-build = "0.11"

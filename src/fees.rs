@@ -73,6 +73,21 @@ impl RldFeeEstimator {
 
         Ok(hash_map)
     }
+
+    pub fn get_low_fee_rate(&self) -> u32 {
+        // MinAllowedNonAnchorChannelRemoteFee is a fee rate we expect to get slowly
+        self.get_est_sat_per_1000_weight(ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee)
+    }
+
+    pub fn get_normal_fee_rate(&self) -> u32 {
+        // NonAnchorChannelFee is a fee rate we expect to be confirmed in 6 blocks
+        self.get_est_sat_per_1000_weight(ConfirmationTarget::NonAnchorChannelFee)
+    }
+
+    pub fn get_high_fee_rate(&self) -> u32 {
+        // OnChainSweep is the highest fee rate we have, so use that
+        self.get_est_sat_per_1000_weight(ConfirmationTarget::OnChainSweep)
+    }
 }
 
 impl FeeEstimator for RldFeeEstimator {

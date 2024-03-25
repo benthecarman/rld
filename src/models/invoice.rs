@@ -1,4 +1,5 @@
 use crate::models::schema::invoices;
+use bitcoin::hashes::Hash;
 use diesel::prelude::*;
 use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,20 @@ impl Invoice {
 
     pub fn status(&self) -> i16 {
         self.status
+    }
+
+    pub fn create(conn: &mut PgConnection, invoice: &Bolt11Invoice) -> anyhow::Result<Invoice> {
+        let new_invoice = NewInvoice {
+            payment_hash: invoice.payment_hash().as_byte_array().to_vec(),
+            preimage: None,
+            amount_msats: invoice.amount_milli_satoshis().map(|a| a as i32),
+            bolt11: invoice.to_string(),
+            status: 0,
+        };
+
+        Ok(diesel::insert_into(invoices::table)
+            .values(&new_invoice)
+            .get_result(conn)?)
     }
 
     pub fn find_by_payment_hash(

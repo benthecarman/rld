@@ -9,6 +9,8 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod channel_closure;
+pub mod channel_open_param;
 pub mod invoice;
 pub mod payment;
 mod schema;

@@ -5,13 +5,16 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::KeysManager;
 use crate::logger::RldLogger;
 use crate::models;
+use crate::models::channel_closure::ChannelClosure;
+use crate::models::channel_open_param::ChannelOpenParam;
 use crate::onchain::OnChainWallet;
 use crate::KeysFile;
 use anyhow::anyhow;
 use bitcoin::bip32::ExtendedPrivKey;
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
-use bitcoin::{BlockHash, Network};
+use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
+use bitcoin::{BlockHash, Network, OutPoint};
 use bitcoincore_rpc::{Auth, RpcApi};
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
@@ -23,6 +26,7 @@ use lightning::ln::channelmanager::{
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
 };
+use lightning::ln::ChannelId;
 use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
@@ -34,17 +38,23 @@ use lightning::util::logger::Logger;
 use lightning::util::persist;
 use lightning::util::persist::{KVStore, MonitorUpdatingPersister};
 use lightning::util::ser::{ReadableArgs, Writeable};
-use lightning::{log_error, log_info};
+use lightning::{log_debug, log_error, log_info};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::{init, poll, SpvClient, UnboundedCache};
+use lightning_invoice::utils::{
+    create_invoice_from_channelmanager, create_invoice_from_channelmanager_with_description_hash,
+};
+use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
+use tokio::time::{sleep, Instant};
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<RldLogger>>;
 
@@ -112,15 +122,17 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 
 #[derive(Clone)]
 pub struct Node {
-    pub peer_manager: Arc<PeerManager>,
-    pub keys_manager: Arc<KeysManager>,
-    pub channel_manager: Arc<ChannelManager>,
-    pub chain_monitor: Arc<ChainMonitor>,
-    pub fee_estimator: Arc<RldFeeEstimator>,
-    network: Network,
-    pub persister: Arc<FilesystemStore>,
-    wallet: Arc<OnChainWallet>,
+    pub(crate) peer_manager: Arc<PeerManager>,
+    pub(crate) keys_manager: Arc<KeysManager>,
+    pub(crate) channel_manager: Arc<ChannelManager>,
+    pub(crate) chain_monitor: Arc<ChainMonitor>,
+    pub(crate) fee_estimator: Arc<RldFeeEstimator>,
+    pub(crate) network: Network,
+    pub(crate) persister: Arc<FilesystemStore>,
+    pub(crate) wallet: Arc<OnChainWallet>,
     pub(crate) logger: Arc<RldLogger>,
+    pub(crate) secp: Secp256k1<All>,
+    pub(crate) db_pool: Pool<ConnectionManager<PgConnection>>,
     stop_listen_connect: Arc<AtomicBool>,
     background_processor: tokio::sync::watch::Receiver<Result<(), std::io::Error>>,
     bp_exit: Arc<tokio::sync::watch::Sender<()>>,
@@ -130,6 +142,7 @@ impl Node {
     pub async fn new(
         config: &Config,
         db_pool: Pool<ConnectionManager<PgConnection>>,
+        stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Node> {
         // Create the datadir if it doesn't exist
         let path = PathBuf::from(&config.data_dir);
@@ -166,6 +179,7 @@ impl Node {
             network,
             &path.clone().join("bdk"),
             fee_estimator.clone(),
+            stop.clone(),
             logger.clone(),
         )?);
 
@@ -404,8 +418,7 @@ impl Node {
 
         let peer_manager_connection_handler = peer_manager.clone();
         let listening_port = config.port;
-        let stop_listen_connect = Arc::new(AtomicBool::new(false));
-        let stop_listen = Arc::clone(&stop_listen_connect);
+        let stop_listen = stop.clone();
         tokio::spawn(async move {
             let listener = tokio::net::TcpListener::bind(format!("[::]:{}", listening_port))
                 .await
@@ -447,6 +460,7 @@ impl Node {
         let event_handler = EventHandler {
             channel_manager: channel_manager.clone(),
             fee_estimator: fee_estimator.clone(),
+            wallet: wallet.clone(),
             keys_manager: keys_manager.clone(),
             db_pool: db_pool.clone(),
             logger: logger.clone(),
@@ -549,7 +563,9 @@ impl Node {
             persister,
             wallet,
             logger,
-            stop_listen_connect,
+            db_pool,
+            secp: Secp256k1::new(),
+            stop_listen_connect: stop,
             background_processor: bp_rx,
             bp_exit: Arc::new(bp_exit),
         };
@@ -594,5 +610,202 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    pub fn create_invoice(
+        &self,
+        description: Bolt11InvoiceDescription,
+        msats: Option<u64>,
+        expiry: Option<u32>,
+    ) -> anyhow::Result<Bolt11Invoice> {
+        let result = match description {
+            Bolt11InvoiceDescription::Direct(desc) => create_invoice_from_channelmanager(
+                &self.channel_manager,
+                self.keys_manager.clone(),
+                self.logger.clone(),
+                self.network.into(),
+                msats,
+                desc.to_string(),
+                expiry.unwrap_or(86_400),
+                None,
+            ),
+            Bolt11InvoiceDescription::Hash(hash) => {
+                create_invoice_from_channelmanager_with_description_hash(
+                    &self.channel_manager,
+                    self.keys_manager.clone(),
+                    self.logger.clone(),
+                    self.network.into(),
+                    msats,
+                    hash.clone(),
+                    expiry.unwrap_or(86_400),
+                    None,
+                )
+            }
+        };
+
+        let invoice = result.map_err(|e| anyhow!("Failed to create invoice: {e}"))?;
+
+        let mut conn = self.db_pool.get()?;
+        models::invoice::Invoice::create(&mut conn, &invoice)?;
+
+        Ok(invoice)
+    }
+
+    pub async fn connect_to_peer(
+        &self,
+        pubkey: PublicKey,
+        peer_addr: SocketAddr,
+    ) -> anyhow::Result<()> {
+        for (node_pubkey, _) in self.peer_manager.get_peer_node_ids() {
+            if node_pubkey == pubkey {
+                return Ok(());
+            }
+        }
+        let res = self.do_connect_peer(pubkey, peer_addr).await;
+        if res.is_err() {
+            log_error!(self.logger, "ERROR: failed to connect to peer");
+        }
+        res
+    }
+
+    pub(crate) async fn do_connect_peer(
+        &self,
+        pubkey: PublicKey,
+        peer_addr: SocketAddr,
+    ) -> anyhow::Result<()> {
+        match lightning_net_tokio::connect_outbound(self.peer_manager.clone(), pubkey, peer_addr)
+            .await
+        {
+            Some(connection_closed_future) => {
+                let mut connection_closed_future = Box::pin(connection_closed_future);
+                loop {
+                    tokio::select! {
+                        _ = &mut connection_closed_future => return Err(anyhow!("Connection closed")),
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                    }
+                    if self
+                        .peer_manager
+                        .get_peer_node_ids()
+                        .iter()
+                        .any(|(id, _)| *id == pubkey)
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            None => Err(anyhow!("Connection timed out")),
+        }
+    }
+
+    async fn await_chan_funding_tx(
+        &self,
+        user_channel_id: u128,
+        pubkey: &PublicKey,
+        timeout: u64,
+    ) -> anyhow::Result<OutPoint> {
+        let start = Instant::now();
+        loop {
+            if self.stop_listen_connect.load(Ordering::Relaxed) {
+                anyhow::bail!("Not running");
+            }
+
+            let mut conn = self.db_pool.get()?;
+            // We will get a channel closure event if the peer rejects the channel
+            // todo return closure reason to user
+            if let Ok(Some(_closure)) =
+                ChannelClosure::find_by_id(&mut conn, user_channel_id as i32)
+            {
+                anyhow::bail!("Channel creation failed");
+            }
+
+            let channels = self.channel_manager.list_channels_with_counterparty(pubkey);
+            let channel = channels
+                .iter()
+                .find(|c| c.user_channel_id == user_channel_id);
+
+            if let Some(outpoint) = channel.and_then(|c| c.funding_txo) {
+                log_info!(self.logger, "Channel funding tx found: {outpoint}");
+                log_debug!(self.logger, "Waiting for Channel Pending event");
+                loop {
+                    // make sure the channel is open
+                    if ChannelOpenParam::find_by_id(&mut conn, user_channel_id as i32)?
+                        .is_some_and(|p| p.success)
+                    {
+                        return Ok(outpoint.into_bitcoin_outpoint());
+                    }
+
+                    let elapsed = start.elapsed().as_secs();
+                    if elapsed > timeout {
+                        anyhow::bail!("Channel creation timed out");
+                    }
+
+                    if self.stop_listen_connect.load(Ordering::Relaxed) {
+                        anyhow::bail!("Not running");
+                    }
+                    sleep(Duration::from_millis(250)).await;
+                }
+            }
+
+            let elapsed = start.elapsed().as_secs();
+            if elapsed > timeout {
+                anyhow::bail!("Channel creation timed out");
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    pub async fn init_open_channel(
+        &self,
+        pubkey: PublicKey,
+        amount_sat: u64,
+        push_msat: u64,
+        sats_per_vbyte: Option<i32>,
+    ) -> anyhow::Result<(ChannelId, u128)> {
+        // save params to db
+        let mut conn = self.db_pool.get()?;
+        let params = ChannelOpenParam::create(&mut conn, sats_per_vbyte)?;
+
+        let user_channel_id: u128 = params.id.try_into()?;
+        match self.channel_manager.create_channel(
+            pubkey,
+            amount_sat,
+            push_msat,
+            user_channel_id,
+            None,
+            None,
+        ) {
+            Ok(channel_id) => {
+                log_info!(
+                    self.logger,
+                    "SUCCESS: channel initiated with peer: {pubkey:?}"
+                );
+                Ok((channel_id, user_channel_id))
+            }
+            Err(e) => {
+                log_error!(
+                    self.logger,
+                    "ERROR: failed to open channel to pubkey {pubkey:?}: {e:?}"
+                );
+                Err(anyhow!(
+                    "Failed to open channel to pubkey {pubkey:?}: {e:?}"
+                ))
+            }
+        }
+    }
+
+    pub async fn open_channel_with_timeout(
+        &self,
+        pubkey: PublicKey,
+        amount_sat: u64,
+        push_msat: u64,
+        sats_per_vbyte: Option<i32>,
+        timeout: u64,
+    ) -> anyhow::Result<OutPoint> {
+        let (_, id) = self
+            .init_open_channel(pubkey, amount_sat, push_msat, sats_per_vbyte)
+            .await?;
+
+        self.await_chan_funding_tx(id, &pubkey, timeout).await
     }
 }

@@ -25,3 +25,22 @@ CREATE TABLE payments
     created_at         timestamp         NOT NULL DEFAULT NOW(),
     updated_at         timestamp         NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE channel_open_params
+(
+    id             SERIAL PRIMARY KEY,
+    sats_per_vbyte INTEGER,
+    opening_tx     bytea,
+    success        BOOLEAN   NOT NULL DEFAULT FALSE,
+    created_at     timestamp NOT NULL DEFAULT NOW(),
+    updated_at     timestamp NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE channel_closures
+(
+    id          SERIAL PRIMARY KEY references channel_open_params (id),
+    node_id     bytea     NOT NULL,
+    funding_txo TEXT,
+    reason      TEXT      NOT NULL,
+    created_at  timestamp NOT NULL DEFAULT NOW()
+);
