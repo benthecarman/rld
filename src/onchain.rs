@@ -1,6 +1,8 @@
 use crate::fees::RldFeeEstimator;
 use crate::keys::coin_type_from_network;
 use crate::logger::RldLogger;
+use anyhow::anyhow;
+use bdk::chain::{BlockId, ConfirmationTime};
 use bdk::template::DescriptorTemplateOut;
 use bdk::wallet::{AddressIndex, AddressInfo, Balance};
 use bdk::{FeeRate, SignOptions, Wallet};
@@ -8,15 +10,15 @@ use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
 use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
 use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::{Network, ScriptBuf};
+use bitcoin::{Network, ScriptBuf, Transaction};
 use bitcoincore_rpc::RpcApi;
 use lightning::util::logger::Logger;
-use lightning::{log_debug, log_info, log_trace};
+use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::time::sleep;
 
 #[derive(Clone)]
@@ -145,6 +147,68 @@ impl OnChainWallet {
                 sleep(Duration::from_secs(30)).await;
             }
         });
+    }
+
+    pub fn broadcast_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+        let txid = tx.txid();
+        log_info!(self.logger, "Broadcasting transaction: {txid}");
+
+        if let Err(e) = self.fees.rpc.send_raw_transaction(&tx) {
+            log_error!(self.logger, "Failed to broadcast transaction ({txid}): {e}");
+            return Err(anyhow!("Failed to broadcast transaction ({txid}): {e}"));
+        } else if let Err(e) = self.insert_tx(
+            tx,
+            ConfirmationTime::Unconfirmed {
+                last_seen: SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)?
+                    .as_secs(),
+            },
+            None,
+        ) {
+            log_warn!(self.logger, "ERROR: Could not sync broadcasted tx ({txid}), will be synced in next iteration: {e:?}");
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn insert_tx(
+        &self,
+        tx: Transaction,
+        position: ConfirmationTime,
+        block_id: Option<BlockId>,
+    ) -> anyhow::Result<()> {
+        let txid = tx.txid();
+        match position {
+            ConfirmationTime::Confirmed { .. } => {
+                // if the transaction is confirmed and we have the block id,
+                // we can insert it directly
+                if let Some(block_id) = block_id {
+                    let mut wallet = self.wallet.try_write().unwrap();
+                    wallet.insert_checkpoint(block_id)?;
+                    wallet.insert_tx(tx, position)?;
+                } else {
+                    return Ok(());
+                }
+            }
+            ConfirmationTime::Unconfirmed { .. } => {
+                // if the transaction is unconfirmed, we can just insert it
+                let mut wallet = self.wallet.try_write().unwrap();
+
+                // if we already have the transaction, we don't need to insert it
+                if wallet.get_tx(txid).is_none() {
+                    // insert tx and commit changes
+                    wallet.insert_tx(tx, position)?;
+                    wallet.commit()?;
+                } else {
+                    log_debug!(
+                        self.logger,
+                        "Tried to insert already existing transaction ({txid})",
+                    )
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn balance(&self) -> Balance {

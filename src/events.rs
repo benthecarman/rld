@@ -4,20 +4,25 @@ use crate::logger::RldLogger;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::invoice::Invoice;
-use crate::node::ChannelManager;
+use crate::node::{ChannelManager, Node, PeerManager};
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
+use bitcoin::absolute::LockTime;
+use bitcoin::secp256k1::Secp256k1;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning::events::Event;
 use lightning::ln::PaymentPreimage;
+use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error, log_info};
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct EventHandler {
     pub channel_manager: Arc<ChannelManager>,
+    pub peer_manager: Arc<PeerManager>,
     pub fee_estimator: Arc<RldFeeEstimator>,
     pub wallet: Arc<OnChainWallet>,
     pub keys_manager: Arc<KeysManager>,
@@ -136,7 +141,23 @@ impl EventHandler {
                 Ok(())
             }
             Event::PaymentClaimed { .. } => Ok(()),
-            Event::ConnectionNeeded { .. } => Ok(()),
+            Event::ConnectionNeeded { node_id, addresses } => {
+                for addr in addresses
+                    .into_iter()
+                    .flat_map(|x| x.to_socket_addrs().unwrap_or_default())
+                {
+                    log_debug!(
+                        self.logger,
+                        "EVENT: ConnectionNeeded connecting to {node_id:?} at {addr}"
+                    );
+                    match Node::do_connect_peer(self.peer_manager.clone(), node_id, addr).await {
+                        Ok(_) => break,
+                        Err(e) => log_error!(self.logger, "ERROR: ConnectionNeeded could not connect to {node_id:?} at {addr}: {e}"),
+                    }
+                }
+
+                Ok(())
+            }
             Event::InvoiceRequestFailed { .. } => Ok(()),
             Event::PaymentSent { .. } => Ok(()),
             Event::PaymentFailed { .. } => Ok(()),
@@ -144,9 +165,77 @@ impl EventHandler {
             Event::PaymentPathFailed { .. } => Ok(()),
             Event::ProbeSuccessful { .. } => Ok(()),
             Event::ProbeFailed { .. } => Ok(()),
-            Event::PendingHTLCsForwardable { .. } => Ok(()),
+            Event::PendingHTLCsForwardable { time_forwardable } => {
+                log_debug!(
+                    self.logger,
+                    "EVENT: PendingHTLCsForwardable: {time_forwardable:?}, processing..."
+                );
+
+                tokio::time::sleep(time_forwardable).await;
+                self.channel_manager.process_pending_htlc_forwards();
+                Ok(())
+            }
             Event::HTLCIntercepted { .. } => Ok(()),
-            Event::SpendableOutputs { .. } => Ok(()),
+            Event::SpendableOutputs {
+                outputs,
+                channel_id,
+            } => {
+                // Filter out static outputs, we don't want to spend them
+                // because they have gone to our BDK wallet.
+                // This would only be a waste in fees.
+                let output_descriptors = outputs
+                    .iter()
+                    .filter(|d| match d {
+                        SpendableOutputDescriptor::StaticOutput { .. } => false,
+                        SpendableOutputDescriptor::DelayedPaymentOutput(_) => true,
+                        SpendableOutputDescriptor::StaticPaymentOutput(_) => true,
+                    })
+                    .collect::<Vec<_>>();
+
+                // If there are no spendable outputs, we don't need to do anything
+                if output_descriptors.is_empty() {
+                    return Ok(());
+                }
+
+                log_debug!(
+                    self.logger,
+                    "EVENT: SpendableOutputs: {output_descriptors:?} for channel {channel_id:?}, processing..."
+                );
+
+                let tx_feerate = self.fee_estimator.get_normal_fee_rate();
+
+                // We set nLockTime to the current height to discourage fee sniping.
+                // Occasionally randomly pick a nLockTime even further back, so
+                // that transactions that are delayed after signing for whatever reason,
+                // e.g. high-latency mix networks and some CoinJoin implementations, have
+                // better privacy.
+                // Logic copied from core: https://github.com/bitcoin/bitcoin/blob/1d4846a8443be901b8a5deb0e357481af22838d0/src/wallet/spend.cpp#L936
+                let mut height = self.channel_manager.current_best_block().height();
+
+                let rand = self.keys_manager.get_secure_random_bytes();
+                // 10% of the time
+                if (u32::from_be_bytes([rand[0], rand[1], rand[2], rand[3]]) % 10) == 0 {
+                    // subtract random number between 0 and 100
+                    height -= u32::from_be_bytes([rand[4], rand[5], rand[6], rand[7]]) % 100;
+                }
+
+                let locktime = LockTime::from_height(height).ok();
+
+                let spending_tx = self
+                    .keys_manager
+                    .spend_spendable_outputs(
+                        &output_descriptors,
+                        Vec::new(),
+                        tx_feerate,
+                        locktime,
+                        &Secp256k1::new(),
+                    )
+                    .map_err(|_| anyhow!("Failed to spend spendable outputs"))?;
+
+                self.wallet.broadcast_transaction(spending_tx)?;
+
+                Ok(())
+            }
             Event::PaymentForwarded { .. } => Ok(()),
             Event::ChannelPending {
                 channel_id,

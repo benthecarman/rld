@@ -459,6 +459,7 @@ impl Node {
         // Step 18: Handle LDK Events
         let event_handler = EventHandler {
             channel_manager: channel_manager.clone(),
+            peer_manager: peer_manager.clone(),
             fee_estimator: fee_estimator.clone(),
             wallet: wallet.clone(),
             keys_manager: keys_manager.clone(),
@@ -661,7 +662,7 @@ impl Node {
                 return Ok(());
             }
         }
-        let res = self.do_connect_peer(pubkey, peer_addr).await;
+        let res = Self::do_connect_peer(self.peer_manager.clone(), pubkey, peer_addr).await;
         if res.is_err() {
             log_error!(self.logger, "ERROR: failed to connect to peer");
         }
@@ -669,13 +670,11 @@ impl Node {
     }
 
     pub(crate) async fn do_connect_peer(
-        &self,
+        peer_manager: Arc<PeerManager>,
         pubkey: PublicKey,
         peer_addr: SocketAddr,
     ) -> anyhow::Result<()> {
-        match lightning_net_tokio::connect_outbound(self.peer_manager.clone(), pubkey, peer_addr)
-            .await
-        {
+        match lightning_net_tokio::connect_outbound(peer_manager.clone(), pubkey, peer_addr).await {
             Some(connection_closed_future) => {
                 let mut connection_closed_future = Box::pin(connection_closed_future);
                 loop {
@@ -683,8 +682,7 @@ impl Node {
                         _ = &mut connection_closed_future => return Err(anyhow!("Connection closed")),
                         _ = tokio::time::sleep(Duration::from_millis(10)) => {},
                     }
-                    if self
-                        .peer_manager
+                    if peer_manager
                         .get_peer_node_ids()
                         .iter()
                         .any(|(id, _)| *id == pubkey)
