@@ -514,47 +514,85 @@ impl Lightning for Node {
         }
 
         if let Ok(invoice) = Bolt11Invoice::from_str(&req.payment_request) {
-            if invoice.network() != self.network {
-                return Err(Status::invalid_argument("Invalid network"));
-            }
-
-            let (hash, onion, route_params) = match invoice.amount_milli_satoshis() {
-                Some(amt) => payment_parameters_from_invoice(&invoice).expect("already checked"),
-                None => {
-                    let msats = if req.amt > 0 {
-                        req.amt * 1_000
-                    } else {
-                        req.amt_msat
-                    };
-                    payment_parameters_from_zero_amount_invoice(&invoice, msats as u64)
-                        .expect("already checked")
-                }
+            let amount_msats = if req.amt_msat > 0 {
+                Some(req.amt_msat as u64)
+            } else if req.amt > 0 {
+                Some(req.amt as u64 * 1_000)
+            } else {
+                None
             };
 
-            self.channel_manager
-                .send_payment(
-                    hash,
-                    onion,
-                    PaymentId(hash.0),
-                    route_params,
-                    Retry::Timeout(Duration::from_secs(30)),
-                )
-                .map_err(|e| Status::internal(format!("{e:?}")))?;
+            if invoice
+                .amount_milli_satoshis()
+                .is_some_and(|a| a != amount_msats.unwrap_or(a))
+            {
+                return Err(Status::invalid_argument(
+                    "Invoice amount does not match request",
+                ));
+            }
 
-            // todo await payment result
+            let payment_hash = invoice.payment_hash().as_byte_array().to_vec();
+            let response: SendResponse = match self
+                .pay_invoice_with_timeout(invoice, amount_msats, Some(5 * 60)) // default 5 minute timeout
+                .await
+            {
+                Ok(payment) => {
+                    let hops: Vec<Hop> = payment
+                        .path()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|hop| Hop {
+                            chan_id: hop.short_channel_id,
+                            chan_capacity: 0,
+                            amt_to_forward: 0,
+                            fee: (hop.fee_msat / 1_000) as i64,
+                            expiry: hop.cltv_expiry_delta,
+                            amt_to_forward_msat: 0,
+                            fee_msat: hop.fee_msat as i64,
+                            pub_key: hop.pubkey.to_string(),
+                            tlv_payload: false,
+                            mpp_record: None,
+                            amp_record: None,
+                            custom_records: Default::default(),
+                            metadata: vec![],
+                        })
+                        .collect();
 
-            // todo set correctly
-            let response = SendResponse {
-                payment_error: "".to_string(),
-                payment_preimage: vec![],
-                payment_route: None,
-                payment_hash: hash.0.to_vec(),
+                    let total_time_lock = hops.iter().map(|h| h.expiry).sum::<u32>();
+
+                    let payment_route = Route {
+                        total_time_lock,
+                        total_fees: payment.fee_msats.unwrap_or_default() as i64 / 1_000,
+                        total_amt: payment.amount_msats as i64 / 1_000,
+                        hops,
+                        total_fees_msat: payment.amount_msats as i64,
+                        total_amt_msat: payment.amount_msats as i64,
+                    };
+
+                    SendResponse {
+                        payment_error: "".to_string(),
+                        payment_preimage: payment
+                            .preimage()
+                            .map(|p| p.to_vec())
+                            .unwrap_or_default(),
+                        payment_route: None,
+                        payment_hash,
+                    }
+                }
+                Err(e) => SendResponse {
+                    payment_error: e.to_string(),
+                    payment_preimage: vec![],
+                    payment_route: None,
+                    payment_hash,
+                },
             };
 
             return Ok(Response::new(response));
         }
 
-        Err(Status::unimplemented("only paying invoices is supported"))
+        Err(Status::unimplemented(
+            "only paying invoices is supported for now",
+        ))
     }
 
     type SendToRouteStream = ReceiverStream<Result<SendResponse, Status>>;

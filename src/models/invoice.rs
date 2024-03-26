@@ -5,6 +5,14 @@ use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum InvoiceStatus {
+    Pending = 0,
+    Paid = 1,
+    Expired = 2,
+    Held = 3,
+}
+
 #[derive(
     Queryable,
     Insertable,
@@ -67,7 +75,7 @@ impl Invoice {
             preimage: None,
             amount_msats: invoice.amount_milli_satoshis().map(|a| a as i32),
             bolt11: invoice.to_string(),
-            status: 0,
+            status: InvoiceStatus::Pending as i16,
         };
 
         Ok(diesel::insert_into(invoices::table)
@@ -83,5 +91,36 @@ impl Invoice {
             .filter(invoices::payment_hash.eq(payment_hash))
             .first(conn)
             .optional()?)
+    }
+
+    pub fn mark_as_paid(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+        preimage: Option<[u8; 32]>,
+        amount_msats: i32,
+    ) -> anyhow::Result<()> {
+        match preimage {
+            Some(preimage) => {
+                diesel::update(invoices::table)
+                    .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
+                    .set((
+                        invoices::preimage.eq(preimage.as_slice()),
+                        invoices::status.eq(InvoiceStatus::Paid as i16),
+                        invoices::amount_msats.eq(Some(amount_msats)),
+                    ))
+                    .execute(conn)?;
+            }
+            None => {
+                diesel::update(invoices::table)
+                    .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
+                    .set((
+                        invoices::status.eq(InvoiceStatus::Paid as i16),
+                        invoices::amount_msats.eq(Some(amount_msats)),
+                    ))
+                    .execute(conn)?;
+            }
+        }
+
+        Ok(())
     }
 }

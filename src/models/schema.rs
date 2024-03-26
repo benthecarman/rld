@@ -43,6 +43,8 @@ diesel::table! {
         bolt11 -> Nullable<Text>,
         bolt12 -> Nullable<Text>,
         status -> Int2,
+        path -> Nullable<Bytea>,
+        blinded_tail -> Nullable<Bytea>,
         created_at -> Timestamp,
         updated_at -> Timestamp,
     }

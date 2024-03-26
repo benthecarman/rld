@@ -4,6 +4,7 @@ use crate::logger::RldLogger;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::invoice::Invoice;
+use crate::models::payment::Payment;
 use crate::node::{ChannelManager, Node, PeerManager};
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
@@ -140,7 +141,29 @@ impl EventHandler {
 
                 Ok(())
             }
-            Event::PaymentClaimed { .. } => Ok(()),
+            Event::PaymentClaimed {
+                receiver_node_id: _,
+                payment_hash,
+                amount_msat,
+                purpose,
+                htlcs: _,
+                sender_intended_total_msat: _,
+            } => {
+                log_debug!(
+                    self.logger,
+                    "EVENT: PaymentClaimed payment hash {payment_hash} of {amount_msat} msats"
+                );
+
+                let mut conn = self.db_pool.get()?;
+                Invoice::mark_as_paid(
+                    &mut conn,
+                    payment_hash.0,
+                    purpose.preimage().map(|p| p.0),
+                    amount_msat as i32,
+                )?;
+
+                Ok(())
+            }
             Event::ConnectionNeeded { node_id, addresses } => {
                 for addr in addresses
                     .into_iter()
@@ -159,9 +182,48 @@ impl EventHandler {
                 Ok(())
             }
             Event::InvoiceRequestFailed { .. } => Ok(()),
-            Event::PaymentSent { .. } => Ok(()),
-            Event::PaymentFailed { .. } => Ok(()),
-            Event::PaymentPathSuccessful { .. } => Ok(()),
+            Event::PaymentSent {
+                payment_id,
+                payment_preimage,
+                payment_hash,
+                fee_paid_msat,
+            } => {
+                log_info!(self.logger, "EVENT: PaymentSent payment_id: {payment_id:?}, payment_hash: {payment_hash:?}, fee_paid_msat: {fee_paid_msat:?}");
+
+                let mut conn = self.db_pool.get()?;
+                Payment::payment_complete(
+                    &mut conn,
+                    payment_hash,
+                    payment_preimage.0,
+                    fee_paid_msat.unwrap_or_default() as i32,
+                )?;
+
+                Ok(())
+            }
+            Event::PaymentFailed {
+                payment_id,
+                payment_hash,
+                reason,
+            } => {
+                log_info!(self.logger, "EVENT: PaymentFailed payment_id: {payment_id}, payment_hash: {payment_hash:?}, reason: {reason:?}");
+
+                let mut conn = self.db_pool.get()?;
+                Payment::payment_failed(&mut conn, payment_hash)?;
+
+                Ok(())
+            }
+            Event::PaymentPathSuccessful {
+                payment_id: _,
+                payment_hash,
+                path,
+            } => {
+                let payment_hash = payment_hash.expect("safe after ldk 0.0.104");
+
+                let mut conn = self.db_pool.get()?;
+                Payment::add_path(&mut conn, payment_hash, path)?;
+
+                Ok(())
+            }
             Event::PaymentPathFailed { .. } => Ok(()),
             Event::ProbeSuccessful { .. } => Ok(()),
             Event::ProbeFailed { .. } => Ok(()),

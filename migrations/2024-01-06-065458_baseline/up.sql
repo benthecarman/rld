@@ -22,6 +22,8 @@ CREATE TABLE payments
     bolt11             TEXT UNIQUE,
     bolt12             TEXT,
     status             SMALLINT          NOT NULL,
+    path               bytea,
+    blinded_tail       bytea,
     created_at         timestamp         NOT NULL DEFAULT NOW(),
     updated_at         timestamp         NOT NULL DEFAULT NOW()
 );

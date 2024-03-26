@@ -7,6 +7,7 @@ use crate::logger::RldLogger;
 use crate::models;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
+use crate::models::payment::{Payment, PaymentStatus};
 use crate::onchain::OnChainWallet;
 use crate::KeysFile;
 use anyhow::anyhow;
@@ -21,12 +22,12 @@ use diesel::PgConnection;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::Event;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs,
+    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId, Retry,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
 };
-use lightning::ln::ChannelId;
+use lightning::ln::{ChannelId, PaymentHash};
 use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
@@ -42,6 +43,9 @@ use lightning::{log_debug, log_error, log_info};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::{init, poll, SpvClient, UnboundedCache};
+use lightning_invoice::payment::{
+    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
+};
 use lightning_invoice::utils::{
     create_invoice_from_channelmanager, create_invoice_from_channelmanager_with_description_hash,
 };
@@ -55,6 +59,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::time::{sleep, Instant};
+use tonic::Status;
+
+const DEFAULT_PAYMENT_TIMEOUT: u64 = 30;
 
 pub(crate) type NetworkGraph = gossip::NetworkGraph<Arc<RldLogger>>;
 
@@ -650,6 +657,96 @@ impl Node {
         models::invoice::Invoice::create(&mut conn, &invoice)?;
 
         Ok(invoice)
+    }
+
+    async fn await_payment(
+        &self,
+        payment_id: PaymentId,
+        payment_hash: PaymentHash,
+        timeout: u64,
+    ) -> anyhow::Result<Payment> {
+        let start = Instant::now();
+        loop {
+            if start.elapsed().as_secs() > timeout {
+                // stop retrying after timeout, this should help prevent
+                // payments completing unexpectedly after the timeout
+                self.channel_manager.abandon_payment(payment_id);
+                return Err(anyhow::anyhow!("Payment timed out"));
+            }
+
+            let payment_info = {
+                let mut conn = self.db_pool.get()?;
+                Payment::find(&mut conn, payment_hash.0)?
+            };
+
+            if let Some(info) = payment_info {
+                match info.status() {
+                    PaymentStatus::Completed => return Ok(info),
+                    PaymentStatus::Failed => return Err(anyhow!("Payment failed")),
+                    PaymentStatus::Pending => {}
+                }
+            }
+
+            sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    pub async fn init_pay_invoice(
+        &self,
+        invoice: Bolt11Invoice,
+        amount_msats: Option<u64>,
+    ) -> anyhow::Result<(PaymentId, PaymentHash)> {
+        if invoice.network() != self.network {
+            anyhow::bail!("Network mismatch");
+        }
+
+        let (hash, onion, route_params) = match invoice.amount_milli_satoshis() {
+            Some(_) => payment_parameters_from_invoice(&invoice).expect("already checked"),
+            None => match amount_msats {
+                Some(msats) => payment_parameters_from_zero_amount_invoice(&invoice, msats)
+                    .expect("already checked"),
+                None => return Err(anyhow!("No amount provided")),
+            },
+        };
+
+        let amount_msats = route_params.final_value_msat;
+
+        let payment_id = PaymentId(hash.0);
+        self.channel_manager
+            .send_payment(
+                hash,
+                onion,
+                payment_id,
+                route_params,
+                Retry::Timeout(Duration::from_secs(30)),
+            )
+            .map_err(|e| Status::internal(format!("{e:?}")))?;
+
+        let mut conn = self.db_pool.get()?;
+        let pk = invoice.recover_payee_pub_key();
+        Payment::create(
+            &mut conn,
+            hash,
+            amount_msats as i32,
+            Some(pk),
+            Some(invoice),
+            None,
+        )?;
+
+        Ok((payment_id, hash))
+    }
+
+    pub async fn pay_invoice_with_timeout(
+        &self,
+        invoice: Bolt11Invoice,
+        amt_sats: Option<u64>,
+        timeout_secs: Option<u64>,
+    ) -> anyhow::Result<Payment> {
+        // initiate payment
+        let (payment_id, payment_hash) = self.init_pay_invoice(invoice, amt_sats).await?;
+        let timeout: u64 = timeout_secs.unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+
+        self.await_payment(payment_id, payment_hash, timeout).await
     }
 
     pub async fn connect_to_peer(
