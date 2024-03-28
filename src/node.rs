@@ -292,7 +292,7 @@ impl Node {
         let mut restarting_node = true;
         let (channel_manager_block_hash, channel_manager) = {
             if let Ok(mut f) = fs::File::open(ldk_data_dir.join("manager")) {
-                let mut channel_monitor_mut_references = Vec::new();
+                let mut channel_monitor_mut_references = Vec::with_capacity(channel_monitors.len());
                 for (_, channel_monitor) in channel_monitors.iter_mut() {
                     channel_monitor_mut_references.push(channel_monitor);
                 }
