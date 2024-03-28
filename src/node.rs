@@ -20,6 +20,7 @@ use bitcoincore_rpc::{Auth, RpcApi};
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
+use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
 use lightning::ln::channelmanager::{
     ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId, Retry,
@@ -34,7 +35,9 @@ use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::{EntropySource, InMemorySigner};
-use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
+use lightning::util::config::{
+    ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig,
+};
 use lightning::util::logger::Logger;
 use lightning::util::persist;
 use lightning::util::persist::{KVStore, MonitorUpdatingPersister};
@@ -127,6 +130,13 @@ type ChainMonitor = chainmonitor::ChainMonitor<
     >,
 >;
 
+pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
+    Arc<TxBroadcaster>,
+    Arc<Wallet<Arc<OnChainWallet>, Arc<RldLogger>>>,
+    Arc<KeysManager>,
+    Arc<RldLogger>,
+>;
+
 #[derive(Clone)]
 pub struct Node {
     pub(crate) peer_manager: Arc<PeerManager>,
@@ -175,7 +185,6 @@ impl Node {
         }
 
         let fee_estimator = Arc::new(RldFeeEstimator::new(bitcoind.clone())?);
-        let broadcaster = Arc::new(TxBroadcaster::new(bitcoind.clone(), logger.clone()));
 
         let seed = keys.seed.to_seed_normalized("");
         let xpriv = ExtendedPrivKey::new_master(network, &seed)?;
@@ -190,6 +199,8 @@ impl Node {
         )?);
 
         wallet.start();
+
+        let broadcaster = Arc::new(TxBroadcaster::new(bitcoind.clone(), wallet.clone(), logger.clone()));
 
         let keys_manager = Arc::new(KeysManager::new(
             xpriv,
@@ -475,6 +486,14 @@ impl Node {
             }
         });
 
+        // create a BumpTransactionEventHandler
+        let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
+            broadcaster.clone(),
+            Arc::new(Wallet::new(wallet.clone(), logger.clone())),
+            keys_manager.clone(),
+            logger.clone(),
+        ));
+
         // Step 18: Handle LDK Events
         let event_handler = EventHandler {
             channel_manager: channel_manager.clone(),
@@ -482,6 +501,7 @@ impl Node {
             fee_estimator: fee_estimator.clone(),
             wallet: wallet.clone(),
             keys_manager: keys_manager.clone(),
+            bump_tx_event_handler,
             db_pool: db_pool.clone(),
             logger: logger.clone(),
         };

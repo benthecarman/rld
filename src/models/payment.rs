@@ -133,7 +133,10 @@ impl Payment {
         })
     }
 
-    pub fn find(conn: &mut PgConnection, payment_hash: [u8; 32]) -> anyhow::Result<Option<Payment>> {
+    pub fn find(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+    ) -> anyhow::Result<Option<Payment>> {
         Ok(payments::table
             .filter(payments::payment_hash.eq(payment_hash.as_slice()))
             .get_result(conn)

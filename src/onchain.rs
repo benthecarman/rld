@@ -10,8 +10,9 @@ use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
 use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
 use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::{Network, ScriptBuf, Transaction, FeeRate};
+use bitcoin::{FeeRate, Network, ScriptBuf, Transaction};
 use bitcoincore_rpc::RpcApi;
+use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
 use std::path::PathBuf;
@@ -246,6 +247,51 @@ impl OnChainWallet {
         log_debug!(self.logger, "Unsigned PSBT: {psbt}");
         wallet.sign(&mut psbt, SignOptions::default())?;
         Ok(psbt)
+    }
+}
+
+impl WalletSource for OnChainWallet {
+    fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
+        let wallet = self.wallet.try_read().map_err(|_| ())?;
+        let utxos = wallet
+            .list_unspent()
+            .map(|u| Utxo {
+                outpoint: u.outpoint,
+                output: u.txout,
+                satisfaction_weight: 4 + 2 + 64,
+            })
+            .collect();
+
+        Ok(utxos)
+    }
+
+    fn get_change_script(&self) -> Result<ScriptBuf, ()> {
+        let mut wallet = self.wallet.try_write().map_err(|_| ())?;
+        let addr = wallet
+            .try_get_internal_address(AddressIndex::New)
+            .map_err(|_| ())?
+            .address;
+        Ok(addr.script_pubkey())
+    }
+
+    fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
+        let wallet = self.wallet.try_read().map_err(|e| {
+            log_error!(
+                self.logger,
+                "Could not get wallet lock to sign transaction: {e:?}"
+            )
+        })?;
+
+        // need to trust witness_utxo for signing since that's LDK sets in the psbt
+        let sign_options = SignOptions {
+            trust_witness_utxo: true,
+            ..Default::default()
+        };
+        wallet
+            .sign(&mut psbt, sign_options)
+            .map_err(|e| log_error!(self.logger, "Could not sign transaction: {e:?}"))?;
+
+        Ok(psbt.extract_tx())
     }
 }
 

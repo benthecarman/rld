@@ -5,7 +5,7 @@ use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::invoice::Invoice;
 use crate::models::payment::Payment;
-use crate::node::{ChannelManager, Node, PeerManager};
+use crate::node::{BumpTxEventHandler, ChannelManager, Node, PeerManager};
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
 use bitcoin::absolute::LockTime;
@@ -27,8 +27,7 @@ pub struct EventHandler {
     pub fee_estimator: Arc<RldFeeEstimator>,
     pub wallet: Arc<OnChainWallet>,
     pub keys_manager: Arc<KeysManager>,
-    // persister: Arc<MutinyNodePersister<S>>,
-    // bump_tx_event_handler: Arc<BumpTxEventHandler<S>>,
+    pub bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub db_pool: Pool<ConnectionManager<PgConnection>>,
     pub logger: Arc<RldLogger>,
 }
@@ -411,7 +410,11 @@ impl EventHandler {
                 Ok(())
             }
             Event::HTLCHandlingFailed { .. } => Ok(()),
-            Event::BumpTransaction(_) => Ok(()),
+            Event::BumpTransaction(event) => {
+                log_debug!(self.logger, "EVENT: BumpTransaction: {event:?}");
+                self.bump_tx_event_handler.handle_event(&event);
+                Ok(())
+            },
         }
     }
 }
