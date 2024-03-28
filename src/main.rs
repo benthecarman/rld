@@ -49,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
     pretty_env_logger::try_init()?;
     let config: Config = Config::parse();
 
+    let logger = Arc::new(RldLogger::default());
+
     // DB management
     let manager = ConnectionManager::<PgConnection>::new(&config.pg_url);
     let db_pool = Pool::builder()
@@ -58,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("Could not build connection pool");
 
     // run migrations
+    log_info!(logger, "Running database migrations");
     let mut connection = db_pool.get()?;
     connection
         .run_pending_migrations(MIGRATIONS)
@@ -68,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = oneshot::channel();
 
     let stop = Arc::new(AtomicBool::new(false));
-    let node = Node::new(&config, db_pool, stop.clone()).await?;
+    let node = Node::new(&config, db_pool, logger, stop.clone()).await?;
 
     // Spawn a task to listen for shutdown signals
     let l = node.logger.clone();

@@ -149,13 +149,12 @@ impl Node {
     pub async fn new(
         config: &Config,
         db_pool: Pool<ConnectionManager<PgConnection>>,
+        logger: Arc<RldLogger>,
         stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Node> {
         // Create the datadir if it doesn't exist
         let path = PathBuf::from(&config.data_dir);
         fs::create_dir_all(path.clone())?;
-
-        let logger = Arc::new(RldLogger::default());
 
         let keys = KeysFile::read(&path.join("keys.json"), config.network(), &logger)?;
 
