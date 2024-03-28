@@ -5,12 +5,12 @@ use anyhow::anyhow;
 use bdk::chain::{BlockId, ConfirmationTime};
 use bdk::template::DescriptorTemplateOut;
 use bdk::wallet::{AddressIndex, AddressInfo, Balance};
-use bdk::{FeeRate, SignOptions, Wallet};
+use bdk::{SignOptions, Wallet};
 use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
 use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
 use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::{Network, ScriptBuf, Transaction};
+use bitcoin::{Network, ScriptBuf, Transaction, FeeRate};
 use bitcoincore_rpc::RpcApi;
 use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
@@ -233,7 +233,7 @@ impl OnChainWallet {
 
         let fee_rate = fee_rate.unwrap_or_else(|| {
             let sat_per_kwu = self.fees.get_normal_fee_rate();
-            FeeRate::from_sat_per_kwu(sat_per_kwu as f32)
+            FeeRate::from_sat_per_kwu(sat_per_kwu as u64)
         });
         let mut psbt = {
             let mut builder = wallet.build_tx();

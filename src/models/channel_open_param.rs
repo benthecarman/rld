@@ -1,7 +1,6 @@
 use crate::models::schema::channel_open_params;
-use bdk::FeeRate;
 use bitcoin::consensus::Decodable;
-use bitcoin::Transaction;
+use bitcoin::{FeeRate, Transaction};
 use diesel::prelude::*;
 use lightning::util::ser::Writeable;
 use serde::{Deserialize, Serialize};
@@ -38,7 +37,7 @@ pub struct NewChannelOpenParam {
 impl ChannelOpenParam {
     pub fn sats_per_vbyte(&self) -> Option<FeeRate> {
         self.sats_per_vbyte
-            .map(|s| FeeRate::from_sat_per_vb(s as f32))
+            .map(|s| FeeRate::from_sat_per_vb(s as u64).expect("invalid sats_per_vbyte"))
     }
 
     pub fn opening_tx(&self) -> Option<Transaction> {

@@ -6,11 +6,10 @@ use crate::proto::channel_point::FundingTxid;
 use crate::proto::lightning_server::Lightning;
 use crate::proto::pending_channels_response::{PendingChannel, PendingOpenChannel};
 use crate::proto::*;
-use bdk::FeeRate;
 use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
 use bitcoin::secp256k1::{Message, PublicKey};
-use bitcoin::Network;
+use bitcoin::{FeeRate, Network};
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::sign::{NodeSigner, Recipient};
 use lightning_invoice::payment::{

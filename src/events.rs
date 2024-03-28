@@ -181,7 +181,13 @@ impl EventHandler {
 
                 Ok(())
             }
-            Event::InvoiceRequestFailed { .. } => Ok(()),
+            Event::InvoiceRequestFailed { payment_id } => {
+                log_info!(
+                    self.logger,
+                    "EVENT: InvoiceRequestFailed payment_id: {payment_id}"
+                );
+                Ok(())
+            }
             Event::PaymentSent {
                 payment_id,
                 payment_preimage,

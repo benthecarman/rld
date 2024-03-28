@@ -34,9 +34,9 @@ clap = { version = "4.5.3", features = ["derive"] }
 bitcoincore-rpc = "0.17.0"
 base64 = "0.13.1"
 
-bdk = "1.0.0-alpha.7"
-bdk_file_store = "0.7.0"
-bdk_bitcoind_rpc = "0.6.0"
+bdk = "1.0.0-alpha.8"
+bdk_file_store = "0.8.0"
+bdk_bitcoind_rpc = "0.7.0"
 
 tonic = "0.11"
 prost = "0.12"
