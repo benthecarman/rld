@@ -34,7 +34,7 @@ use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::{EntropySource, InMemorySigner};
-use lightning::util::config::UserConfig;
+use lightning::util::config::{ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig};
 use lightning::util::logger::Logger;
 use lightning::util::persist;
 use lightning::util::persist::{KVStore, MonitorUpdatingPersister};
@@ -268,14 +268,27 @@ impl Node {
         ));
 
         // Step 11: Initialize the ChannelManager
-        let mut user_config = UserConfig::default();
-        user_config
-            .channel_handshake_limits
-            .force_announced_channel_preference = false;
-        user_config
-            .channel_handshake_config
-            .negotiate_anchors_zero_fee_htlc_tx = true;
-        user_config.manually_accept_inbound_channels = true;
+        let user_config = UserConfig {
+            channel_handshake_config: ChannelHandshakeConfig {
+                negotiate_scid_privacy: true,
+                negotiate_anchors_zero_fee_htlc_tx: true,
+                ..Default::default()
+            },
+            channel_handshake_limits: ChannelHandshakeLimits {
+                force_announced_channel_preference: false,
+                ..Default::default()
+            },
+            channel_config: ChannelConfig {
+                forwarding_fee_proportional_millionths: 10_000,
+                accept_underpaying_htlcs: false,
+                ..Default::default()
+            },
+            accept_forwards_to_priv_channels: true,
+            accept_inbound_channels: true,
+            manually_accept_inbound_channels: true,
+            accept_mpp_keysend: true,
+            ..Default::default()
+        };
         let mut restarting_node = true;
         let (channel_manager_block_hash, channel_manager) = {
             if let Ok(mut f) = fs::File::open(ldk_data_dir.join("manager")) {
