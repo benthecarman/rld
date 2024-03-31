@@ -7,6 +7,7 @@ use crate::logger::RldLogger;
 use crate::models;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
+use crate::models::invoice::Invoice;
 use crate::models::payment::{Payment, PaymentStatus};
 use crate::onchain::OnChainWallet;
 use crate::KeysFile;
@@ -61,6 +62,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
+use tokio::sync::broadcast;
 use tokio::time::{sleep, Instant};
 use tonic::Status;
 
@@ -153,6 +155,10 @@ pub struct Node {
     stop_listen_connect: Arc<AtomicBool>,
     background_processor: tokio::sync::watch::Receiver<Result<(), std::io::Error>>,
     bp_exit: Arc<tokio::sync::watch::Sender<()>>,
+
+    // broadcast channels
+    pub(crate) invoice_broadcast: broadcast::Sender<Invoice>,
+    pub(crate) invoice_rx: Arc<broadcast::Receiver<Invoice>>,
 }
 
 impl Node {
@@ -200,7 +206,11 @@ impl Node {
 
         wallet.start();
 
-        let broadcaster = Arc::new(TxBroadcaster::new(bitcoind.clone(), wallet.clone(), logger.clone()));
+        let broadcaster = Arc::new(TxBroadcaster::new(
+            bitcoind.clone(),
+            wallet.clone(),
+            logger.clone(),
+        ));
 
         let keys_manager = Arc::new(KeysManager::new(
             xpriv,
@@ -494,6 +504,8 @@ impl Node {
             logger.clone(),
         ));
 
+        let (invoice_broadcast, invoice_rx) = broadcast::channel(16);
+
         // Step 18: Handle LDK Events
         let event_handler = EventHandler {
             channel_manager: channel_manager.clone(),
@@ -504,6 +516,7 @@ impl Node {
             bump_tx_event_handler,
             db_pool: db_pool.clone(),
             logger: logger.clone(),
+            invoice_broadcast: invoice_broadcast.clone(),
         };
         let event_handler_func = move |event: Event| {
             let ev = event_handler.clone();
@@ -608,6 +621,8 @@ impl Node {
             stop_listen_connect: stop,
             background_processor: bp_rx,
             bp_exit: Arc::new(bp_exit),
+            invoice_broadcast,
+            invoice_rx: Arc::new(invoice_rx),
         };
 
         Ok(node)
@@ -686,7 +701,9 @@ impl Node {
         let invoice = result.map_err(|e| anyhow!("Failed to create invoice: {e}"))?;
 
         let mut conn = self.db_pool.get()?;
-        models::invoice::Invoice::create(&mut conn, &invoice)?;
+        let inv = Invoice::create(&mut conn, &invoice)?;
+
+        self.invoice_broadcast.send(inv)?;
 
         Ok(invoice)
     }

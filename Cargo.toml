@@ -29,7 +29,7 @@ lightning-persister = "0.0.121"
 lightning-invoice = "0.29.0"
 serde = "1.0"
 serde_json = "1.0"
-tokio = { version = "1.36.0", features = ["full"] }
+tokio = { version = "1.36.0", features = ["full", "sync"] }
 clap = { version = "4.5.3", features = ["derive"] }
 bitcoincore-rpc = "0.17.0"
 base64 = "0.13.1"

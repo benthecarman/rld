@@ -30,6 +30,9 @@ pub struct EventHandler {
     pub bump_tx_event_handler: Arc<BumpTxEventHandler>,
     pub db_pool: Pool<ConnectionManager<PgConnection>>,
     pub logger: Arc<RldLogger>,
+
+    // broadcast channels
+    pub invoice_broadcast: tokio::sync::broadcast::Sender<Invoice>,
 }
 
 impl EventHandler {
@@ -154,12 +157,14 @@ impl EventHandler {
                 );
 
                 let mut conn = self.db_pool.get()?;
-                Invoice::mark_as_paid(
+                let inv = Invoice::mark_as_paid(
                     &mut conn,
                     payment_hash.0,
                     purpose.preimage().map(|p| p.0),
                     amount_msat as i32,
                 )?;
+
+                self.invoice_broadcast.send(inv)?;
 
                 Ok(())
             }

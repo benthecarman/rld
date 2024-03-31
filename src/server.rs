@@ -1,8 +1,10 @@
 #![allow(deprecated)]
 #![allow(unused)]
 
+use crate::models::invoice::InvoiceStatus;
 use crate::node::Node;
 use crate::proto::channel_point::FundingTxid;
+use crate::proto::invoice::InvoiceState;
 use crate::proto::lightning_server::Lightning;
 use crate::proto::pending_channels_response::{PendingChannel, PendingOpenChannel};
 use crate::proto::*;
@@ -679,7 +681,20 @@ impl Lightning for Node {
         &self,
         request: Request<InvoiceSubscription>,
     ) -> Result<Response<Self::SubscribeInvoicesStream>, Status> {
-        todo!()
+        let mut node_rx = self.invoice_broadcast.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Invoice, Status>>(128);
+        tokio::spawn(async move {
+            while let Ok(item) = node_rx.recv().await {
+                if tx.is_closed() {
+                    break;
+                }
+
+                let invoice = invoice_to_lnrpc_invoice(item);
+                tx.send(Ok(invoice)).await.unwrap()
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn decode_pay_req(
@@ -942,5 +957,82 @@ impl Lightning for Node {
         request: Request<LookupHtlcResolutionRequest>,
     ) -> Result<Response<LookupHtlcResolutionResponse>, Status> {
         todo!()
+    }
+}
+
+fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice {
+    let bolt11 = invoice.bolt11();
+    let state: InvoiceState = match invoice.status() {
+        InvoiceStatus::Pending => InvoiceState::Open,
+        InvoiceStatus::Expired => InvoiceState::Canceled,
+        InvoiceStatus::Held => InvoiceState::Accepted,
+        InvoiceStatus::Paid => InvoiceState::Settled,
+    };
+    let settle_date = if state == InvoiceState::Settled {
+        invoice.updated_date()
+    } else {
+        0
+    };
+
+    let route_hints = bolt11
+        .route_hints()
+        .iter()
+        .map(|hint| RouteHint {
+            hop_hints: hint
+                .0
+                .iter()
+                .map(|hop| HopHint {
+                    node_id: hop.src_node_id.to_string(),
+                    chan_id: hop.short_channel_id,
+                    fee_base_msat: hop.fees.base_msat,
+                    fee_proportional_millionths: hop.fees.proportional_millionths,
+                    cltv_expiry_delta: hop.cltv_expiry_delta as u32,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let amt_paid_msat = if state == InvoiceState::Settled {
+        bolt11.amount_milli_satoshis().unwrap_or(0) as i64
+    } else {
+        0
+    };
+
+    let (memo, description_hash) = match bolt11.description() {
+        Bolt11InvoiceDescription::Direct(desc) => (desc.to_string(), vec![]),
+        Bolt11InvoiceDescription::Hash(hash) => (String::new(), hash.0.to_byte_array().to_vec()),
+    };
+
+    Invoice {
+        memo,
+        r_preimage: invoice.preimage().map(|p| p.to_vec()).unwrap_or_default(),
+        r_hash: bolt11.payment_hash().to_byte_array().to_vec(),
+        value: bolt11
+            .amount_milli_satoshis()
+            .map(|a| a / 1_000)
+            .unwrap_or(0) as i64,
+        value_msat: bolt11.amount_milli_satoshis().unwrap_or(0) as i64,
+        settled: state == InvoiceState::Settled,
+        creation_date: invoice.creation_date(),
+        settle_date,
+        payment_request: bolt11.to_string(),
+        description_hash,
+        expiry: bolt11.expires_at().unwrap_or_default().as_secs() as i64,
+        fallback_addr: "".to_string(),
+        cltv_expiry: bolt11.min_final_cltv_expiry_delta(),
+        route_hints,
+        private: !bolt11.route_hints().is_empty(),
+        add_index: 0,
+        settle_index: 0,
+        amt_paid: 0,
+        amt_paid_sat: amt_paid_msat / 1_000,
+        amt_paid_msat,
+        state: state.into(),
+        htlcs: vec![],
+        features: Default::default(),
+        is_keysend: false,
+        payment_addr: bolt11.payment_secret().0.to_vec(),
+        is_amp: false,
+        amp_invoice_state: Default::default(),
     }
 }

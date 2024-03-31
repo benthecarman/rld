@@ -65,8 +65,22 @@ impl Invoice {
         Bolt11Invoice::from_str(&self.bolt11).expect("invalid bolt11")
     }
 
-    pub fn status(&self) -> i16 {
-        self.status
+    pub fn status(&self) -> InvoiceStatus {
+        match self.status {
+            0 => InvoiceStatus::Pending,
+            1 => InvoiceStatus::Paid,
+            2 => InvoiceStatus::Expired,
+            3 => InvoiceStatus::Held,
+            _ => panic!("Invalid invoice status")
+        }
+    }
+
+    pub fn creation_date(&self) -> i64 {
+        self.created_at.and_utc().timestamp()
+    }
+
+    pub fn updated_date(&self) -> i64 {
+        self.updated_at.and_utc().timestamp()
     }
 
     pub fn create(conn: &mut PgConnection, invoice: &Bolt11Invoice) -> anyhow::Result<Invoice> {
@@ -98,29 +112,25 @@ impl Invoice {
         payment_hash: [u8; 32],
         preimage: Option<[u8; 32]>,
         amount_msats: i32,
-    ) -> anyhow::Result<()> {
-        match preimage {
-            Some(preimage) => {
-                diesel::update(invoices::table)
-                    .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
-                    .set((
-                        invoices::preimage.eq(preimage.as_slice()),
-                        invoices::status.eq(InvoiceStatus::Paid as i16),
-                        invoices::amount_msats.eq(Some(amount_msats)),
-                    ))
-                    .execute(conn)?;
-            }
-            None => {
-                diesel::update(invoices::table)
-                    .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
-                    .set((
-                        invoices::status.eq(InvoiceStatus::Paid as i16),
-                        invoices::amount_msats.eq(Some(amount_msats)),
-                    ))
-                    .execute(conn)?;
-            }
-        }
+    ) -> anyhow::Result<Self> {
+        let res = match preimage {
+            Some(preimage) => diesel::update(invoices::table)
+                .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
+                .set((
+                    invoices::preimage.eq(preimage.as_slice()),
+                    invoices::status.eq(InvoiceStatus::Paid as i16),
+                    invoices::amount_msats.eq(Some(amount_msats)),
+                ))
+                .get_result(conn)?,
+            None => diesel::update(invoices::table)
+                .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
+                .set((
+                    invoices::status.eq(InvoiceStatus::Paid as i16),
+                    invoices::amount_msats.eq(Some(amount_msats)),
+                ))
+                .get_result(conn)?,
+        };
 
-        Ok(())
+        Ok(res)
     }
 }
