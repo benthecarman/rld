@@ -168,9 +168,7 @@ impl Node {
         logger: Arc<RldLogger>,
         stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Node> {
-        // Create the datadir if it doesn't exist
         let path = PathBuf::from(&config.data_dir);
-        fs::create_dir_all(path.clone())?;
 
         let keys = KeysFile::read(&path.join("keys.json"), config.network(), &logger)?;
 

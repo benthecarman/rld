@@ -33,16 +33,19 @@ tokio = { version = "1.36.0", features = ["full", "sync"] }
 clap = { version = "4.5.3", features = ["derive"] }
 bitcoincore-rpc = "0.17.0"
 base64 = "0.13.1"
+hex = "0.4.3"
 
 bdk = "1.0.0-alpha.8"
 bdk_file_store = "0.8.0"
 bdk_bitcoind_rpc = "0.7.0"
 
-tonic = "0.11"
+tonic = { version = "0.11", features = ["tls"] }
 prost = "0.12"
 tonic-web = "0.11"
 tonic-reflection = "0.11"
 tower-http = "0.4"
+macaroon = "0.3.0"
+rcgen = "0.13.0"
 
 [build-dependencies]
 tonic-build = "0.11"

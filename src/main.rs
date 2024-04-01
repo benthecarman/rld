@@ -16,15 +16,19 @@ use diesel::PgConnection;
 use diesel_migrations::MigrationHarness;
 use lightning::util::logger::Logger;
 use lightning::{log_error, log_info};
+use macaroon::{ByteString, Format, Macaroon, MacaroonKey, Verifier};
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::oneshot;
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
+use tonic::{Request, Status};
 
 mod chain;
 mod cli;
@@ -40,8 +44,6 @@ mod server;
 
 pub mod proto {
     tonic::include_proto!("lnrpc");
-
-    pub(crate) const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("lightning");
 }
 
 #[tokio::main]
@@ -50,6 +52,78 @@ async fn main() -> anyhow::Result<()> {
     let config: Config = Config::parse();
 
     let logger = Arc::new(RldLogger::default());
+
+    // Create the datadir if it doesn't exist
+    let path = PathBuf::from(&config.data_dir);
+    fs::create_dir_all(path.clone())?;
+
+    let tls_cert_path = path.clone().join("tls.cert");
+    let tls_key_path = path.clone().join("tls.key");
+
+    let cert_bytes = fs::read(&tls_cert_path);
+    let key_bytes = fs::read(&tls_key_path);
+
+    let (cert, tls_key) = match (cert_bytes, key_bytes) {
+        (Ok(cert), Ok(key)) => (cert, key),
+        (Err(e1), Err(e2)) => {
+            // make sure file not found error
+            if e1.kind() != std::io::ErrorKind::NotFound {
+                return Err(e1.into());
+            } else if e2.kind() != std::io::ErrorKind::NotFound {
+                return Err(e2.into());
+            } else {
+                log_info!(logger, "Generating self-signed certificate");
+                // Generate a self-signed certificate and private key
+                let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+                let CertifiedKey { cert, key_pair } =
+                    generate_simple_self_signed(subject_alt_names)?;
+
+                let pem = cert.pem();
+                let cert_bytes = pem.as_bytes();
+                fs::write(&tls_cert_path, cert_bytes)?;
+
+                let key_pem = key_pair.serialize_pem();
+                let key_bytes = key_pem.as_bytes();
+                fs::write(&tls_key_path, key_bytes)?;
+
+                (cert_bytes.to_vec(), key_bytes.to_vec())
+            }
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "tls.cert and tls.key must be both present or both absent"
+            ));
+        }
+    };
+
+    let tls_config = ServerTlsConfig::new().identity(Identity::from_pem(&cert, &tls_key));
+
+    let macaroon_key_path = path.clone().join("macaroon_key");
+
+    let mac_key = match fs::read(&macaroon_key_path) {
+        Ok(bytes) => {
+            let arr: [u8; 32] = bytes.as_slice().try_into()?;
+            MacaroonKey::from(arr)
+        }
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            } else {
+                log_info!(logger, "Generating admin macaroon");
+                let mac_key = MacaroonKey::generate_random();
+                let macaroon = Macaroon::create(Some("rld".into()), &mac_key, "admin".into())?;
+
+                fs::write(&macaroon_key_path, mac_key)?;
+
+                let macaroon_base64 = macaroon.serialize(Format::V1)?;
+                // base64 decode to get raw bytes
+                let macaroon_bytes = base64::decode_config(macaroon_base64, base64::URL_SAFE)?;
+                let admin_macaroon_path = path.join("admin.macaroon");
+                fs::write(admin_macaroon_path, macaroon_bytes)?;
+                mac_key
+            }
+        }
+    };
 
     // DB management
     let manager = ConnectionManager::<PgConnection>::new(&config.pg_url);
@@ -98,18 +172,16 @@ async fn main() -> anyhow::Result<()> {
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
     });
 
-    let service = tonic_reflection::server::Builder::configure()
-        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
-        .build()?;
-
     let socket_addr = SocketAddr::from_str(&format!("{}:{}", config.rpc_bind, config.rpc_port))?;
     let server_node = node.clone();
     Server::builder()
         .accept_http1(true)
+        .tls_config(tls_config)?
         .layer(tower_http::cors::CorsLayer::permissive())
-        .add_service(service)
-        .add_service(tonic_web::enable(LightningServer::new(server_node.clone())))
-        // .add_service(AdminServer::with_interceptor(admin, check_auth))
+        .add_service(tonic_web::enable(LightningServer::with_interceptor(
+            server_node.clone(),
+            move |req| check_auth(req, &mac_key),
+        )))
         .serve_with_shutdown(socket_addr, async move {
             if let Err(e) = rx.await {
                 log_error!(server_node.logger, "Error receiving shutdown signal: {e}");
@@ -131,7 +203,7 @@ struct KeysFile {
 
 impl KeysFile {
     pub fn read(path: &Path, network: Network, logger: &RldLogger) -> anyhow::Result<Self> {
-        match std::fs::read_to_string(path) {
+        match fs::read_to_string(path) {
             Ok(file) => {
                 let keys: KeysFile = serde_json::from_str(&file)?;
                 if keys.network != network {
@@ -146,12 +218,46 @@ impl KeysFile {
                     OsRng.fill_bytes(&mut entropy);
                     let seed = Mnemonic::from_entropy(&entropy)?;
                     let keys = KeysFile { seed, network };
-                    std::fs::write(path, serde_json::to_string(&keys)?)?;
+                    fs::write(path, serde_json::to_string(&keys)?)?;
                     Ok(keys)
                 } else {
                     Err(e.into())
                 }
             }
         }
+    }
+}
+
+fn time_before_verifier(caveat: &ByteString) -> bool {
+    if !caveat.0.starts_with(b"time-before ") {
+        return false;
+    }
+    let str_caveat = match std::str::from_utf8(&caveat.0) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    match chrono::DateTime::parse_from_rfc3339(&str_caveat[12..]) {
+        Ok(_time) => true, // todo probably need to actually check the time
+        Err(_) => false,
+    }
+}
+
+fn check_auth(req: Request<()>, macaroon_key: &MacaroonKey) -> Result<Request<()>, Status> {
+    match req.metadata().get("macaroon") {
+        Some(t) => {
+            let hex = hex::decode(t).map_err(|e| {
+                Status::unauthenticated(format!("Invalid macaroon hex encoding: {e}"))
+            })?;
+            let mac = Macaroon::deserialize_binary(&hex)
+                .map_err(|e| Status::unauthenticated(format!("Invalid macaroon encoding: {e}")))?;
+            let mut verifier = Verifier::default();
+            verifier.satisfy_general(time_before_verifier); // lncli adds this
+            match verifier.verify(&mac, macaroon_key, Default::default()) {
+                Ok(_) => Ok(req),
+                Err(e) => Err(Status::unauthenticated(format!("Invalid macaroon: {e}"))),
+            }
+        }
+        _ => Err(Status::unauthenticated("No valid auth token")),
     }
 }
