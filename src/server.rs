@@ -190,12 +190,15 @@ impl Lightning for Node {
         };
 
         let message = Message::from(msg);
-        let sig = self
+        let recoverable = self
             .secp
-            .sign_ecdsa(&message, &self.keys_manager.get_node_secret_key());
+            .sign_ecdsa_recoverable(&message, &self.keys_manager.get_node_secret_key());
 
+        let (id, sig) = recoverable.serialize_compact();
+        let mut bytes = sig.to_vec();
+        bytes.push(id.to_i32() as u8);
         let response = SignMessageResponse {
-            signature: sig.to_string(),
+            signature: hex::encode(bytes),
         };
         Ok(Response::new(response))
     }
