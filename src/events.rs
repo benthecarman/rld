@@ -12,7 +12,7 @@ use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
-use lightning::events::Event;
+use lightning::events::{ClosureReason, Event};
 use lightning::ln::PaymentPreimage;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
@@ -370,14 +370,23 @@ impl EventHandler {
                         .unwrap_or_else(|| "unknown".to_string())
                 );
 
-                ChannelClosure::create(
-                    &mut conn,
-                    id,
-                    node_id,
-                    channel_funding_txo.map(|x| x.into_bitcoin_outpoint()),
-                    reason.to_string(),
-                )?;
-
+                match reason {
+                    ClosureReason::FundingBatchClosure
+                    | ClosureReason::DisconnectedPeer
+                    | ClosureReason::CounterpartyCoopClosedUnfundedChannel => {
+                        log_debug!(self.logger, "EVENT: ChannelClosed, ignored");
+                    }
+                    reason => {
+                        log_debug!(self.logger, "EVENT: ChannelClosed persisting to db");
+                        ChannelClosure::create(
+                            &mut conn,
+                            id,
+                            node_id,
+                            channel_funding_txo.map(|x| x.into_bitcoin_outpoint()),
+                            reason.to_string(),
+                        )?;
+                    }
+                }
                 Ok(())
             }
             Event::DiscardFunding { .. } => {
@@ -419,7 +428,7 @@ impl EventHandler {
                 log_debug!(self.logger, "EVENT: BumpTransaction: {event:?}");
                 self.bump_tx_event_handler.handle_event(&event);
                 Ok(())
-            },
+            }
         }
     }
 }
