@@ -9,7 +9,8 @@ use crate::proto::lightning_server::Lightning;
 use crate::proto::pending_channels_response::{PendingChannel, PendingOpenChannel};
 use crate::proto::*;
 use bitcoin::ecdsa::Signature;
-use bitcoin::hashes::{sha256::Hash as Sha256, Hash};
+use bitcoin::hashes::{sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
+use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::{Message, PublicKey};
 use bitcoin::{FeeRate, Network};
 use lightning::ln::channelmanager::{PaymentId, Retry};
@@ -182,24 +183,13 @@ impl Lightning for Node {
         request: Request<SignMessageRequest>,
     ) -> Result<Response<SignMessageResponse>, Status> {
         let req = request.into_inner();
-        let msg = if req.single_hash {
-            Sha256::hash(&req.msg)
-        } else {
-            let first = Sha256::hash(&req.msg);
-            Sha256::hash(first.as_byte_array())
-        };
 
-        let message = Message::from(msg);
-        let recoverable = self
-            .secp
-            .sign_ecdsa_recoverable(&message, &self.keys_manager.get_node_secret_key());
-
-        let (id, sig) = recoverable.serialize_compact();
-        let mut bytes = sig.to_vec();
-        bytes.push(id.to_i32() as u8);
-        let response = SignMessageResponse {
-            signature: hex::encode(bytes),
-        };
+        let signature = lightning::util::message_signing::sign(
+            &req.msg,
+            &self.keys_manager.get_node_secret_key(),
+        )
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let response = SignMessageResponse { signature };
         Ok(Response::new(response))
     }
 
@@ -207,7 +197,29 @@ impl Lightning for Node {
         &self,
         request: Request<VerifyMessageRequest>,
     ) -> Result<Response<VerifyMessageResponse>, Status> {
-        todo!()
+        let req = request.into_inner();
+
+        match lightning::util::message_signing::recover_pk(&req.msg, &req.signature) {
+            Ok(pubkey) => {
+                let graph = self.network_graph.read_only();
+                let valid = graph
+                    .node(&pubkey.into())
+                    .map(|n| !n.channels.is_empty())
+                    .unwrap_or_default();
+                let response = VerifyMessageResponse {
+                    valid,
+                    pubkey: pubkey.to_string(),
+                };
+                Ok(Response::new(response))
+            }
+            Err(_) => {
+                let response = VerifyMessageResponse {
+                    valid: false,
+                    pubkey: "".to_string(),
+                };
+                Ok(Response::new(response))
+            }
+        }
     }
 
     async fn connect_peer(
