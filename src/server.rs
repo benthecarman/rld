@@ -2,6 +2,7 @@
 #![allow(unused)]
 
 use crate::models::invoice::InvoiceStatus;
+use crate::models::CreatedInvoice;
 use crate::node::Node;
 use crate::proto::channel_point::FundingTxid;
 use crate::proto::invoice::InvoiceState;
@@ -1007,7 +1008,7 @@ impl Lightning for Node {
             Some(req.value as u64 * 1_000)
         };
 
-        let invoice = if req.description_hash.is_empty() {
+        let CreatedInvoice { id, bolt11 } = if req.description_hash.is_empty() {
             let desc =
                 Description::new(req.memo).map_err(|e| Status::invalid_argument(e.to_string()))?;
             let desc = Bolt11InvoiceDescription::Direct(&desc);
@@ -1025,10 +1026,10 @@ impl Lightning for Node {
         };
 
         let response = AddInvoiceResponse {
-            payment_request: invoice.to_string(),
-            r_hash: invoice.payment_hash().to_byte_array().to_vec(),
-            add_index: 0,
-            payment_addr: invoice.payment_secret().0.to_vec(),
+            payment_request: bolt11.to_string(),
+            r_hash: bolt11.payment_hash().to_byte_array().to_vec(),
+            add_index: id as u64,
+            payment_addr: bolt11.payment_secret().0.to_vec(),
         };
 
         Ok(Response::new(response))
@@ -1045,7 +1046,22 @@ impl Lightning for Node {
         &self,
         request: Request<PaymentHash>,
     ) -> Result<Response<Invoice>, Status> {
-        todo!()
+        let req = request.into_inner();
+
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let opt = crate::models::invoice::Invoice::find_by_payment_hash(&mut conn, &req.r_hash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        match opt {
+            Some(invoice) => {
+                let invoice = invoice_to_lnrpc_invoice(invoice);
+                Ok(Response::new(invoice))
+            }
+            None => Err(Status::not_found("Invoice not found")),
+        }
     }
 
     type SubscribeInvoicesStream = ReceiverStream<Result<Invoice, Status>>;
@@ -1394,6 +1410,8 @@ fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice
         Bolt11InvoiceDescription::Hash(hash) => (String::new(), hash.0.to_byte_array().to_vec()),
     };
 
+    let fallback_addr = bolt11.fallback_addresses().first().map(|a| a.to_string());
+
     Invoice {
         memo,
         r_preimage: invoice.preimage().map(|p| p.to_vec()).unwrap_or_default(),
@@ -1409,12 +1427,12 @@ fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice
         payment_request: bolt11.to_string(),
         description_hash,
         expiry: bolt11.expires_at().unwrap_or_default().as_secs() as i64,
-        fallback_addr: "".to_string(),
+        fallback_addr: fallback_addr.unwrap_or_default(),
         cltv_expiry: bolt11.min_final_cltv_expiry_delta(),
         route_hints,
         private: !bolt11.route_hints().is_empty(),
-        add_index: 0,
-        settle_index: 0,
+        add_index: invoice.id as u64,
+        settle_index: invoice.id as u64,
         amt_paid: 0,
         amt_paid_sat: amt_paid_msat / 1_000,
         amt_paid_msat,

@@ -28,6 +28,7 @@ pub enum InvoiceStatus {
 #[diesel(primary_key(payment_hash))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Invoice {
+    pub id: i32,
     payment_hash: Vec<u8>,
     preimage: Option<Vec<u8>>,
     bolt11: String,

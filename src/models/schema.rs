@@ -22,7 +22,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    invoices (payment_hash) {
+    invoices (id) {
+        id -> Int4,
         payment_hash -> Bytea,
         preimage -> Nullable<Bytea>,
         bolt11 -> Text,

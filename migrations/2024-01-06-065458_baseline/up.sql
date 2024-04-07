@@ -1,14 +1,16 @@
 CREATE TABLE invoices
 (
-    payment_hash bytea PRIMARY KEY NOT NULL,
+    id           SERIAL PRIMARY KEY,
+    payment_hash bytea UNIQUE NOT NULL,
     preimage     bytea UNIQUE,
-    bolt11       TEXT UNIQUE       NOT NULL,
+    bolt11       TEXT UNIQUE  NOT NULL,
     amount_msats INTEGER,
-    status       SMALLINT          NOT NULL,
-    created_at   timestamp         NOT NULL DEFAULT NOW(),
-    updated_at   timestamp         NOT NULL DEFAULT NOW()
+    status       SMALLINT     NOT NULL,
+    created_at   timestamp    NOT NULL DEFAULT NOW(),
+    updated_at   timestamp    NOT NULL DEFAULT NOW()
 );
 
+create unique index invoice_payment_hash_index on invoices (payment_hash);
 create unique index invoice_bolt11_index on invoices (bolt11);
 create index invoice_status_index on invoices (status);
 

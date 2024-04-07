@@ -9,6 +9,7 @@ use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::invoice::Invoice;
 use crate::models::payment::{Payment, PaymentStatus};
+use crate::models::CreatedInvoice;
 use crate::onchain::OnChainWallet;
 use crate::KeysFile;
 use anyhow::anyhow;
@@ -674,7 +675,7 @@ impl Node {
         description: Bolt11InvoiceDescription,
         msats: Option<u64>,
         expiry: Option<u32>,
-    ) -> anyhow::Result<Bolt11Invoice> {
+    ) -> anyhow::Result<CreatedInvoice> {
         let result = match description {
             Bolt11InvoiceDescription::Direct(desc) => create_invoice_from_channelmanager(
                 &self.channel_manager,
@@ -705,9 +706,13 @@ impl Node {
         let mut conn = self.db_pool.get()?;
         let inv = Invoice::create(&mut conn, &invoice)?;
 
+        let id = inv.id;
         self.invoice_broadcast.send(inv)?;
 
-        Ok(invoice)
+        Ok(CreatedInvoice {
+            id,
+            bolt11: invoice,
+        })
     }
 
     async fn await_payment(

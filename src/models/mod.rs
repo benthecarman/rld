@@ -4,6 +4,8 @@ use bitcoin::Network;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringDecayParameters};
 use lightning::util::ser::ReadableArgs;
+use lightning_invoice::Bolt11Invoice;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -16,6 +18,12 @@ pub mod payment;
 mod schema;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CreatedInvoice {
+    pub id: i32,
+    pub bolt11: Bolt11Invoice,
+}
 
 pub(crate) fn read_network_graph(
     path: &Path,
