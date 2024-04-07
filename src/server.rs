@@ -1084,6 +1084,24 @@ impl Lightning for Node {
             Bolt11InvoiceDescription::Hash(hash) => (String::new(), hash.0.to_string()),
         };
 
+        let route_hints = invoice
+            .route_hints()
+            .iter()
+            .map(|hint| RouteHint {
+                hop_hints: hint
+                    .0
+                    .iter()
+                    .map(|hop| HopHint {
+                        node_id: hop.src_node_id.to_string(),
+                        chan_id: hop.short_channel_id,
+                        fee_base_msat: hop.fees.base_msat,
+                        fee_proportional_millionths: hop.fees.proportional_millionths,
+                        cltv_expiry_delta: hop.cltv_expiry_delta as u32,
+                    })
+                    .collect(),
+            })
+            .collect();
+
         let resp = PayReq {
             destination: invoice.recover_payee_pub_key().to_string(),
             payment_hash: invoice.payment_hash().to_string(),
@@ -1105,7 +1123,7 @@ impl Lightning for Node {
                 .map(|a| a.to_string())
                 .unwrap_or_default(),
             cltv_expiry: invoice.min_final_cltv_expiry_delta() as i64,
-            route_hints: vec![],
+            route_hints,
             payment_addr: invoice.payment_secret().0.to_vec(),
             num_msat: invoice.amount_milli_satoshis().unwrap_or_default() as i64,
             features: Default::default(),
