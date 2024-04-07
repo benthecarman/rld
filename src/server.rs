@@ -686,7 +686,7 @@ impl Lightning for Node {
                         as i64,
                     remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
                     initiator: if c.is_outbound { 1 } else { 2 },
-                    commitment_type: 2, // todo handle anchors
+                    commitment_type: CommitmentType::StaticRemoteKey.into(), // todo handle anchors
                     num_forwarding_packages: 0,
                     chan_status_flags: "".to_string(),
                     private: !c.is_public,
