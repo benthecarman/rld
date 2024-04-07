@@ -8,13 +8,19 @@ use crate::proto::invoice::InvoiceState;
 use crate::proto::lightning_server::Lightning;
 use crate::proto::pending_channels_response::{PendingChannel, PendingOpenChannel};
 use crate::proto::*;
+use bdk::chain::ConfirmationTime;
+use bitcoin::address::Payload;
+use bitcoin::consensus::serialize;
 use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::{Message, PublicKey};
-use bitcoin::{FeeRate, Network};
+use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut};
+use bitcoincore_rpc::RpcApi;
+use itertools::Itertools;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::sign::{NodeSigner, Recipient};
+use lightning::util::ser::Writeable;
 use lightning_invoice::payment::{
     payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
 };
@@ -122,28 +128,276 @@ impl Lightning for Node {
         &self,
         request: Request<GetTransactionsRequest>,
     ) -> Result<Response<TransactionDetails>, Status> {
-        todo!()
+        let GetTransactionsRequest {
+            start_height,
+            end_height,
+            account,
+        } = request.into_inner();
+
+        if !account.is_empty() || account != "default" {
+            return Err(Status::unimplemented("account is not supported"));
+        }
+
+        let transactions = self
+            .wallet
+            .list_transactions()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let current_height = self
+            .bitcoind
+            .get_block_count()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let transactions = transactions
+            .into_iter()
+            .filter_map(|t| {
+                let (block_height, time_stamp) = match t.confirmation_time {
+                    ConfirmationTime::Confirmed { height, time } => (height as i32, time),
+                    ConfirmationTime::Unconfirmed { last_seen } => (-1, last_seen),
+                };
+
+                if block_height < start_height || block_height > end_height {
+                    return None;
+                }
+
+                let raw_tx_hex = hex::encode(serialize(&t.transaction));
+
+                let block_hash = if block_height > 0 {
+                    self.bitcoind
+                        .get_block_hash(block_height as u64)
+                        .unwrap()
+                        .to_string()
+                } else {
+                    String::new()
+                };
+
+                let dest_addresses = t
+                    .transaction
+                    .output
+                    .iter()
+                    .flat_map(|o| {
+                        Address::from_script(&o.script_pubkey, self.network)
+                            .map(|a| a.to_string())
+                            .ok()
+                    })
+                    .collect();
+
+                let output_details = t
+                    .output_details
+                    .iter()
+                    .map(|o| {
+                        let output_type = get_output_type(&o.spk);
+                        OutputDetail {
+                            output_type: output_type.into(),
+                            address: o.address.clone().unwrap_or_default(),
+                            pk_script: o.spk.to_hex_string(),
+                            output_index: o.output_index as i64,
+                            amount: o.amount as i64,
+                            is_our_address: o.is_our_address,
+                        }
+                    })
+                    .collect();
+
+                let previous_outpoints = t
+                    .previous_outpoints
+                    .into_iter()
+                    .map(|o| PreviousOutPoint {
+                        outpoint: o.outpoint.to_string(),
+                        is_our_output: o.is_our_output,
+                    })
+                    .collect_vec();
+
+                Some(Transaction {
+                    tx_hash: t.txid.to_string(),
+                    amount: (t.received - t.sent) as i64,
+                    num_confirmations: current_height as i32 - block_height + 1,
+                    block_hash,
+                    block_height,
+                    time_stamp: time_stamp as i64,
+                    total_fees: t.fee.unwrap_or_default() as i64,
+                    dest_addresses,
+                    output_details,
+                    raw_tx_hex,
+                    label: "".to_string(),
+                    previous_outpoints,
+                })
+            })
+            .collect();
+
+        Ok(Response::new(TransactionDetails { transactions }))
     }
 
     async fn estimate_fee(
         &self,
         request: Request<EstimateFeeRequest>,
     ) -> Result<Response<EstimateFeeResponse>, Status> {
-        todo!()
+        let req = request.into_inner();
+
+        let res = self
+            .bitcoind
+            .estimate_smart_fee(req.target_conf as u16, None)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if let Some(per_kb) = res.fee_rate {
+            let fee_rate = FeeRate::from_sat_per_vb_unchecked(per_kb.to_sat() / 1_000);
+
+            let outputs = req
+                .addr_to_amount
+                .into_iter()
+                .map(|(addr, amt)| {
+                    Address::from_str(&addr)
+                        .map_err(|e| Status::invalid_argument(format!("{:?}", e)))
+                        .map(|a| TxOut {
+                            script_pubkey: a.payload.script_pubkey(),
+                            value: amt as u64,
+                        })
+                })
+                .collect::<Result<Vec<TxOut>, Status>>()?;
+
+            let fee_sat = self
+                .wallet
+                .estimate_fee_to_outputs(outputs, Some(fee_rate))
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let response = EstimateFeeResponse {
+                fee_sat: fee_sat as i64,
+                feerate_sat_per_byte: fee_rate.to_sat_per_vb_ceil() as i64,
+                sat_per_vbyte: fee_rate.to_sat_per_vb_ceil(),
+            };
+
+            Ok(Response::new(response))
+        } else {
+            Err(Status::internal("Error getting fee rate"))
+        }
     }
 
     async fn send_coins(
         &self,
         request: Request<SendCoinsRequest>,
     ) -> Result<Response<SendCoinsResponse>, Status> {
-        todo!()
+        let req = request.into_inner();
+
+        if req.sat_per_byte != 0 {
+            return Err(Status::unimplemented("sat_per_byte is not supported"));
+        }
+
+        if req.sat_per_vbyte != 0 && req.target_conf != 0 {
+            return Err(Status::invalid_argument(
+                "Cannot have both sat_per_vbyte and target_conf",
+            ));
+        }
+
+        if req.amount == 0 && !req.send_all {
+            return Err(Status::invalid_argument("amount or send_all is required"));
+        }
+
+        if req.min_confs != 0 {
+            return Err(Status::unimplemented("min_confs is not supported"));
+        }
+
+        let address = Address::from_str(&req.addr)
+            .map_err(|e| Status::invalid_argument(format!("{:?}", e)))?
+            .require_network(self.network)
+            .map_err(|e| Status::invalid_argument(format!("{:?}", e)))?;
+
+        let fee_rate = if req.sat_per_vbyte != 0 {
+            Some(FeeRate::from_sat_per_vb_unchecked(req.sat_per_vbyte))
+        } else if req.target_conf != 0 {
+            let res = self
+                .bitcoind
+                .estimate_smart_fee(req.target_conf as u16, None)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if let Some(per_kb) = res.fee_rate {
+                Some(FeeRate::from_sat_per_vb_unchecked(per_kb.to_sat() / 1_000))
+            } else {
+                return Err(Status::internal("Error getting fee rate"));
+            }
+        } else {
+            None
+        };
+
+        let txid = if req.amount > 0 {
+            self.wallet
+                .send_to_address(address, req.amount as u64, fee_rate)
+                .map_err(|e| Status::internal(format!("Error sending coins: {:?}", e)))?
+        } else if req.send_all {
+            self.wallet
+                .sweep(address, fee_rate)
+                .map_err(|e| Status::internal(format!("Error sending coins: {:?}", e)))?
+        } else {
+            return Err(Status::invalid_argument("amount or send_all is required"));
+        };
+
+        Ok(Response::new(SendCoinsResponse {
+            txid: txid.to_string(),
+        }))
     }
 
     async fn list_unspent(
         &self,
         request: Request<ListUnspentRequest>,
     ) -> Result<Response<ListUnspentResponse>, Status> {
-        todo!()
+        let ListUnspentRequest {
+            min_confs,
+            max_confs,
+            account,
+        } = request.into_inner();
+
+        if !account.is_empty() || account != "default" {
+            return Err(Status::unimplemented("account is not supported"));
+        }
+
+        let utxos = self
+            .wallet
+            .list_utxos()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let current_height = self
+            .bitcoind
+            .get_block_count()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let utxos = utxos
+            .into_iter()
+            .filter_map(|u| {
+                let confs = match u.confirmation_time {
+                    ConfirmationTime::Confirmed { height, .. } => {
+                        current_height as i32 - height as i32 + 1
+                    }
+                    ConfirmationTime::Unconfirmed { .. } => 0,
+                };
+
+                if confs >= min_confs && confs <= max_confs {
+                    let address_type = if u.txout.script_pubkey.is_v1_p2tr() {
+                        AddressType::TaprootPubkey
+                    } else if u.txout.script_pubkey.is_v0_p2wpkh() {
+                        AddressType::WitnessPubkeyHash
+                    } else if u.txout.script_pubkey.is_p2sh() {
+                        AddressType::NestedPubkeyHash
+                    } else {
+                        return None; // unsupported address type
+                    };
+                    let address = Address::from_script(&u.txout.script_pubkey, self.network)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                    Some(Utxo {
+                        address_type: address_type.into(),
+                        address,
+                        amount_sat: u.txout.value as i64,
+                        pk_script: u.txout.script_pubkey.to_hex_string(),
+                        outpoint: Some(OutPoint {
+                            txid_bytes: u.outpoint.txid.encode(),
+                            txid_str: u.outpoint.txid.to_string(),
+                            output_index: u.outpoint.vout,
+                        }),
+                        confirmations: confs as i64,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(Response::new(ListUnspentResponse { utxos }))
     }
 
     type SubscribeTransactionsStream = ReceiverStream<Result<Transaction, Status>>;
@@ -159,7 +413,63 @@ impl Lightning for Node {
         &self,
         request: Request<SendManyRequest>,
     ) -> Result<Response<SendManyResponse>, Status> {
-        todo!()
+        let req = request.into_inner();
+
+        if req.sat_per_byte != 0 {
+            return Err(Status::unimplemented("sat_per_byte is not supported"));
+        }
+
+        if req.sat_per_vbyte != 0 && req.target_conf != 0 {
+            return Err(Status::invalid_argument(
+                "Cannot have both sat_per_vbyte and target_conf",
+            ));
+        }
+
+        if req.addr_to_amount.is_empty() {
+            return Err(Status::invalid_argument("addr_to_amount is required"));
+        }
+
+        if req.min_confs != 0 {
+            return Err(Status::unimplemented("min_confs is not supported"));
+        }
+
+        let fee_rate = if req.sat_per_vbyte != 0 {
+            Some(FeeRate::from_sat_per_vb_unchecked(req.sat_per_vbyte))
+        } else if req.target_conf != 0 {
+            let res = self
+                .bitcoind
+                .estimate_smart_fee(req.target_conf as u16, None)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if let Some(per_kb) = res.fee_rate {
+                Some(FeeRate::from_sat_per_vb_unchecked(per_kb.to_sat() / 1_000))
+            } else {
+                return Err(Status::internal("Error getting fee rate"));
+            }
+        } else {
+            None
+        };
+
+        let outputs = req
+            .addr_to_amount
+            .into_iter()
+            .map(|(addr, amt)| {
+                Address::from_str(&addr)
+                    .map_err(|e| Status::invalid_argument(format!("{:?}", e)))
+                    .map(|a| TxOut {
+                        script_pubkey: a.payload.script_pubkey(),
+                        value: amt as u64,
+                    })
+            })
+            .collect::<Result<Vec<TxOut>, Status>>()?;
+
+        let txid = self
+            .wallet
+            .send_to_outputs(outputs, fee_rate)
+            .map_err(|e| Status::internal(format!("Error sending coins: {:?}", e)))?;
+
+        Ok(Response::new(SendManyResponse {
+            txid: txid.to_string(),
+        }))
     }
 
     async fn new_address(
@@ -403,7 +713,55 @@ impl Lightning for Node {
         &self,
         request: Request<ListChannelsRequest>,
     ) -> Result<Response<ListChannelsResponse>, Status> {
-        todo!()
+        let chans = self.channel_manager.list_channels();
+        let channels = chans
+            .into_iter()
+            .map(|c| Channel {
+                active: c.is_usable,
+                remote_pubkey: c.counterparty.node_id.to_string(),
+                channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
+                chan_id: c.short_channel_id.unwrap_or_default(),
+                capacity: c.channel_value_satoshis as i64,
+                local_balance: c.balance_msat as i64 / 1_000,
+                remote_balance: c
+                    .counterparty
+                    .outbound_htlc_maximum_msat
+                    .unwrap_or_default() as i64
+                    / 1_000,
+                commit_fee: 0,
+                commit_weight: 0,
+                fee_per_kw: c.feerate_sat_per_1000_weight.unwrap_or_default() as i64,
+                unsettled_balance: 0,
+                total_satoshis_sent: 0,
+                total_satoshis_received: 0,
+                num_updates: 0,
+                pending_htlcs: vec![],
+                csv_delay: c.force_close_spend_delay.unwrap_or_default() as u32,
+                private: !c.is_public,
+                initiator: c.is_outbound,
+                chan_status_flags: "".to_string(),
+                local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default() as i64,
+                remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
+                static_remote_key: true,
+                commitment_type: 0,
+                lifetime: 0,
+                uptime: 0,
+                close_address: "".to_string(),
+                push_amount_sat: 0,
+                thaw_height: 0,
+                local_constraints: None,
+                remote_constraints: None,
+                alias_scids: c.inbound_scid_alias.map(|a| vec![a]).unwrap_or_default(),
+                zero_conf: false,
+                zero_conf_confirmed_scid: 0,
+                peer_alias: "".to_string(),
+                peer_scid_alias: c.outbound_scid_alias.unwrap_or_default(),
+                memo: "".to_string(),
+            })
+            .collect();
+
+        let resp = ListChannelsResponse { channels };
+        Ok(Response::new(resp))
     }
 
     type SubscribeChannelEventsStream = ReceiverStream<Result<ChannelEventUpdate, Status>>;
@@ -1049,5 +1407,27 @@ fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice
         payment_addr: bolt11.payment_secret().0.to_vec(),
         is_amp: false,
         amp_invoice_state: Default::default(),
+    }
+}
+
+fn get_output_type(spk: &ScriptBuf) -> OutputScriptType {
+    if spk.is_p2pkh() {
+        OutputScriptType::ScriptTypePubkeyHash
+    } else if spk.is_p2sh() {
+        OutputScriptType::ScriptTypeScriptHash
+    } else if spk.is_v0_p2wpkh() {
+        OutputScriptType::ScriptTypeWitnessV0PubkeyHash
+    } else if spk.is_v0_p2wsh() {
+        OutputScriptType::ScriptTypeWitnessV0ScriptHash
+    } else if spk.is_v1_p2tr() {
+        OutputScriptType::ScriptTypeWitnessV1Taproot
+    } else if spk.is_witness_program() {
+        OutputScriptType::ScriptTypeWitnessUnknown
+    } else if spk.is_p2pk() {
+        OutputScriptType::ScriptTypePubkey
+    } else if spk.is_op_return() {
+        OutputScriptType::ScriptTypeNulldata
+    } else {
+        OutputScriptType::ScriptTypeNonStandard
     }
 }

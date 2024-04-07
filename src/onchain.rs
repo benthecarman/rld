@@ -2,25 +2,80 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::coin_type_from_network;
 use crate::logger::RldLogger;
 use anyhow::anyhow;
+use bdk::chain::indexed_tx_graph::Indexer;
 use bdk::chain::{BlockId, ConfirmationTime};
+use bdk::psbt::PsbtUtils;
 use bdk::template::DescriptorTemplateOut;
 use bdk::wallet::{AddressIndex, AddressInfo, Balance};
-use bdk::{SignOptions, Wallet};
+use bdk::{LocalOutput, SignOptions, Wallet};
 use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
+use bitcoin::address::Payload;
 use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
 use bitcoin::psbt::PartiallySignedTransaction;
-use bitcoin::{FeeRate, Network, ScriptBuf, Transaction};
+use bitcoin::{Address, FeeRate, Network, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::time::sleep;
+
+/// A wallet transaction
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TransactionDetails {
+    /// Optional transaction
+    pub transaction: Transaction,
+    /// Transaction id
+    pub txid: Txid,
+    /// Received value (sats)
+    /// Sum of owned outputs of this transaction.
+    pub received: u64,
+    /// Sent value (sats)
+    /// Sum of owned inputs of this transaction.
+    pub sent: u64,
+    /// Fee value in sats if it was available.
+    pub fee: Option<u64>,
+    /// Fee Rate if it was available.
+    pub fee_rate: Option<FeeRate>,
+    /// If the transaction is confirmed, contains height and Unix timestamp of the block containing the
+    /// transaction, unconfirmed transaction contains `None`.
+    pub confirmation_time: ConfirmationTime,
+    /// Details of the outputs of the transaction
+    pub previous_outpoints: Vec<PreviousOutpoint>,
+    /// Details of the outputs of the transaction
+    pub output_details: Vec<OutputDetails>,
+}
+
+/// Details of an input in a transaction
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PreviousOutpoint {
+    /// The outpoint
+    pub outpoint: OutPoint,
+    /// Denotes if the output is controlled by the internal wallet
+    pub is_our_output: bool,
+}
+
+/// Details of an output in a transaction
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OutputDetails {
+    /// The address
+    pub address: Option<String>,
+    /// The script pub key
+    pub spk: ScriptBuf,
+    /// The output index used in the raw transaction
+    pub output_index: usize,
+    /// The value of the output coin in satoshis
+    pub amount: u64,
+    /// Denotes if the output is controlled by the internal wallet
+    pub is_our_address: bool,
+}
 
 #[derive(Clone)]
 pub(crate) struct OnChainWallet {
@@ -247,6 +302,260 @@ impl OnChainWallet {
         log_debug!(self.logger, "Unsigned PSBT: {psbt}");
         wallet.sign(&mut psbt, SignOptions::default())?;
         Ok(psbt)
+    }
+
+    pub fn send_to_address(
+        &self,
+        addr: Address,
+        amount: u64,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<Txid> {
+        let psbt = self.create_signed_psbt_to_spk(addr.script_pubkey(), amount, fee_rate)?;
+
+        let raw_transaction = psbt.extract_tx();
+        let txid = raw_transaction.txid();
+
+        self.broadcast_transaction(raw_transaction)?;
+        log_debug!(self.logger, "Transaction broadcast! TXID: {txid}");
+        Ok(txid)
+    }
+
+    pub fn create_sweep_psbt(
+        &self,
+        spk: ScriptBuf,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<PartiallySignedTransaction> {
+        let mut wallet = self.wallet.try_write().unwrap();
+
+        let fee_rate = fee_rate.unwrap_or_else(|| {
+            let sat_per_kwu = self.fees.get_normal_fee_rate();
+            FeeRate::from_sat_per_kwu(sat_per_kwu as u64)
+        });
+
+        let mut psbt = {
+            let mut builder = wallet.build_tx();
+            builder
+                .drain_wallet() // Spend all outputs in this wallet.
+                .drain_to(spk)
+                .enable_rbf()
+                .fee_rate(fee_rate);
+            builder.finish()?
+        };
+        log_debug!(self.logger, "Unsigned PSBT: {psbt}");
+        let _ = wallet.sign(&mut psbt, SignOptions::default())?;
+        Ok(psbt)
+    }
+
+    pub fn sweep(&self, addr: Address, fee_rate: Option<FeeRate>) -> anyhow::Result<Txid> {
+        let psbt = self.create_sweep_psbt(addr.script_pubkey(), fee_rate)?;
+
+        let raw_transaction = psbt.extract_tx();
+        let txid = raw_transaction.txid();
+
+        self.broadcast_transaction(raw_transaction)?;
+        log_debug!(self.logger, "Transaction broadcast! TXID: {txid}");
+        Ok(txid)
+    }
+
+    pub fn create_unsigned_psbt_to_outputs(
+        &self,
+        outputs: Vec<TxOut>,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<PartiallySignedTransaction> {
+        if outputs.is_empty() {
+            return Err(anyhow!("No outputs provided"));
+        }
+
+        let mut wallet = self.wallet.try_write().unwrap();
+
+        let fee_rate = fee_rate.unwrap_or_else(|| {
+            let sat_per_kwu = self.fees.get_normal_fee_rate();
+            FeeRate::from_sat_per_kwu(sat_per_kwu as u64)
+        });
+        let mut builder = wallet.build_tx();
+        builder.enable_rbf();
+        builder.fee_rate(fee_rate);
+
+        for output in outputs {
+            builder.add_recipient(output.script_pubkey, output.value);
+        }
+
+        Ok(builder.finish()?)
+    }
+
+    pub fn estimate_fee_to_outputs(
+        &self,
+        outputs: Vec<TxOut>,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<u64> {
+        let psbt = self.create_unsigned_psbt_to_outputs(outputs, fee_rate)?;
+        psbt.fee_amount()
+            .ok_or_else(|| anyhow!("Could not estimate fee"))
+    }
+
+    pub fn send_to_outputs(
+        &self,
+        outputs: Vec<TxOut>,
+        fee_rate: Option<FeeRate>,
+    ) -> anyhow::Result<Txid> {
+        let mut psbt = self.create_unsigned_psbt_to_outputs(outputs, fee_rate)?;
+        {
+            let wallet = self.wallet.try_read().unwrap();
+            wallet.sign(&mut psbt, SignOptions::default())?;
+        }
+
+        let raw_transaction = psbt.extract_tx();
+        let txid = raw_transaction.txid();
+
+        self.broadcast_transaction(raw_transaction)?;
+        log_debug!(self.logger, "Transaction broadcast! TXID: {txid}");
+        Ok(txid)
+    }
+
+    /// List all UTXOs in the wallet
+    pub fn list_utxos(&self) -> anyhow::Result<Vec<LocalOutput>> {
+        Ok(self.wallet.try_read().unwrap().list_unspent().collect())
+    }
+
+    /// Lists all the on-chain transactions in the wallet.
+    /// These are sorted by confirmation time.
+    pub fn list_transactions(&self) -> anyhow::Result<Vec<TransactionDetails>> {
+        if let Ok(wallet) = self.wallet.try_read() {
+            let my_outpoints = wallet
+                .list_output()
+                .map(|o| o.outpoint)
+                .collect::<HashSet<OutPoint>>();
+
+            let txs = wallet
+                .transactions()
+                .filter_map(|tx| {
+                    // skip txs that were not relevant to our bdk wallet
+                    if wallet.spk_index().is_tx_relevant(tx.tx_node.tx) {
+                        let (sent, received) = wallet.spk_index().sent_and_received(tx.tx_node.tx);
+
+                        let fee = wallet.calculate_fee(tx.tx_node.tx).ok();
+                        let fee_rate = wallet.calculate_fee_rate(tx.tx_node.tx).ok();
+
+                        let output_details = tx
+                            .tx_node
+                            .tx
+                            .output
+                            .iter()
+                            .enumerate()
+                            .map(|(output_index, output)| {
+                                let script = output.script_pubkey.as_script();
+                                let address = Payload::from_script(script)
+                                    .ok()
+                                    .map(|p| Address::new(self.network, p).to_string());
+                                OutputDetails {
+                                    address,
+                                    spk: output.script_pubkey.clone(),
+                                    output_index,
+                                    amount: output.value,
+                                    is_our_address: wallet.is_mine(script),
+                                }
+                            })
+                            .collect();
+
+                        let previous_outpoints = tx
+                            .tx_node
+                            .tx
+                            .input
+                            .iter()
+                            .map(|p| PreviousOutpoint {
+                                outpoint: p.previous_output,
+                                is_our_output: my_outpoints.contains(&p.previous_output),
+                            })
+                            .collect();
+
+                        Some(TransactionDetails {
+                            transaction: tx.tx_node.tx.clone(),
+                            txid: tx.tx_node.txid,
+                            received,
+                            sent,
+                            fee,
+                            fee_rate,
+                            confirmation_time: tx.chain_position.cloned().into(),
+                            previous_outpoints,
+                            output_details,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return Ok(txs);
+        }
+        log_error!(
+            self.logger,
+            "Could not get wallet lock to list transactions"
+        );
+        Err(anyhow::anyhow!(
+            "Could not get wallet lock to list transactions"
+        ))
+    }
+
+    /// Gets the details of a specific on-chain transaction.
+    pub fn get_transaction(&self, txid: Txid) -> anyhow::Result<Option<TransactionDetails>> {
+        let wallet = self.wallet.try_read().unwrap();
+        let bdk_tx = wallet.get_tx(txid);
+
+        match bdk_tx {
+            None => Ok(None),
+            Some(tx) => {
+                let my_outpoints = wallet
+                    .list_output()
+                    .map(|o| o.outpoint)
+                    .collect::<HashSet<OutPoint>>();
+
+                let (sent, received) = wallet.sent_and_received(tx.tx_node.tx);
+                let fee = wallet.calculate_fee(tx.tx_node.tx).ok();
+                let fee_rate = wallet.calculate_fee_rate(tx.tx_node.tx).ok();
+                let output_details = tx
+                    .tx_node
+                    .tx
+                    .output
+                    .iter()
+                    .enumerate()
+                    .map(|(output_index, output)| {
+                        let script = output.script_pubkey.as_script();
+                        let address = Payload::from_script(script)
+                            .ok()
+                            .map(|p| Address::new(self.network, p).to_string());
+                        OutputDetails {
+                            address,
+                            spk: output.script_pubkey.clone(),
+                            output_index,
+                            amount: output.value,
+                            is_our_address: wallet.is_mine(script),
+                        }
+                    })
+                    .collect();
+                let previous_outpoints = tx
+                    .tx_node
+                    .tx
+                    .input
+                    .iter()
+                    .map(|p| PreviousOutpoint {
+                        outpoint: p.previous_output,
+                        is_our_output: my_outpoints.contains(&p.previous_output),
+                    })
+                    .collect();
+                let details = TransactionDetails {
+                    transaction: tx.tx_node.tx.to_owned(),
+                    txid,
+                    received,
+                    sent,
+                    fee,
+                    fee_rate,
+                    confirmation_time: tx.chain_position.cloned().into(),
+                    previous_outpoints,
+                    output_details,
+                };
+
+                Ok(Some(details))
+            }
+        }
     }
 }
 
