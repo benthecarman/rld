@@ -689,7 +689,7 @@ impl Node {
         })
     }
 
-    async fn await_payment(
+    pub(crate) async fn await_payment(
         &self,
         payment_id: PaymentId,
         payment_hash: PaymentHash,

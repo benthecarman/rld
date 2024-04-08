@@ -33,6 +33,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
+use tonic::codegen::tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 
 #[tonic::async_trait]
@@ -966,7 +967,133 @@ impl Lightning for Node {
         &self,
         request: Request<Streaming<SendRequest>>,
     ) -> Result<Response<Self::SendPaymentStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        // todo add routing steps
+        let mut stream = request.into_inner();
+        let req = stream.message().await.unwrap().unwrap();
+
+        let amount_msats = if req.amt > 0 && req.amt_msat > 0 {
+            return Err(Status::invalid_argument("Cannot have amt and amt_msat"));
+        } else if req.amt_msat > 0 {
+            Some(req.amt_msat as u64)
+        } else if req.amt > 0 {
+            Some(req.amt as u64 * 1_000)
+        } else {
+            None
+        };
+
+        let result = if req.payment_request.is_empty() {
+            if amount_msats.is_none() {
+                return Err(Status::invalid_argument("amt or amt_msat is required"));
+            }
+
+            let node_id = PublicKey::from_slice(&req.dest)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+
+            let tlvs = req.dest_custom_records.into_iter().collect_vec();
+
+            self.init_keysend(node_id, amount_msats.unwrap(), tlvs)
+                .await
+        } else if let Ok(invoice) = Bolt11Invoice::from_str(&req.payment_request) {
+            if invoice
+                .amount_milli_satoshis()
+                .is_some_and(|a| a != amount_msats.unwrap_or(a))
+            {
+                return Err(Status::invalid_argument(
+                    "Invoice amount does not match request",
+                ));
+            }
+
+            let payment_hash = invoice.payment_hash().as_byte_array().to_vec();
+            self.init_pay_invoice(invoice, amount_msats).await
+        } else {
+            return Err(Status::invalid_argument("Invalid payment params"));
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<SendResponse, Status>>(128);
+        let mut params: Option<(PaymentId, lightning::ln::PaymentHash)> = None;
+        let first_res = match result {
+            Ok((id, payment_hash)) => {
+                params = Some((id, payment_hash));
+                SendResponse {
+                    payment_error: "".to_string(),
+                    payment_preimage: vec![],
+                    payment_route: None,
+                    payment_hash: payment_hash.0.to_vec(),
+                }
+            }
+            Err(e) => SendResponse {
+                payment_error: e.to_string(),
+                payment_preimage: vec![],
+                payment_route: None,
+                payment_hash: vec![],
+            },
+        };
+
+        tx.send(Ok(first_res)).await.unwrap();
+
+        if let Some((id, payment_hash)) = params {
+            let self_clone = self.clone();
+            tokio::spawn(async move {
+                let result = self_clone.await_payment(id, payment_hash, 5 * 60).await;
+
+                if tx.is_closed() {
+                    return;
+                }
+
+                let res = match result {
+                    Ok(payment) => {
+                        let hops: Vec<Hop> = payment
+                            .path()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|hop| Hop {
+                                chan_id: hop.short_channel_id,
+                                chan_capacity: 0,
+                                amt_to_forward: 0,
+                                fee: (hop.fee_msat / 1_000) as i64,
+                                expiry: hop.cltv_expiry_delta,
+                                amt_to_forward_msat: 0,
+                                fee_msat: hop.fee_msat as i64,
+                                pub_key: hop.pubkey.to_string(),
+                                tlv_payload: false,
+                                mpp_record: None,
+                                amp_record: None,
+                                custom_records: Default::default(),
+                                metadata: vec![],
+                            })
+                            .collect();
+
+                        let total_time_lock = hops.iter().map(|h| h.expiry).sum::<u32>();
+
+                        let payment_route = Route {
+                            total_time_lock,
+                            total_fees: payment.fee_msats.unwrap_or_default() as i64 / 1_000,
+                            total_amt: payment.amount_msats as i64 / 1_000,
+                            hops,
+                            total_fees_msat: payment.amount_msats as i64,
+                            total_amt_msat: payment.amount_msats as i64,
+                        };
+
+                        SendResponse {
+                            payment_error: "".to_string(),
+                            payment_preimage: payment.preimage().map(|p| p.to_vec()).unwrap_or_default(),
+                            payment_route: None,
+                            payment_hash: payment.payment_hash().to_vec(),
+                        }
+                    }
+                    Err(e) => SendResponse {
+                        payment_error: e.to_string(),
+                        payment_preimage: vec![],
+                        payment_route: None,
+                        payment_hash: vec![],
+                    },
+                };
+
+                tx.send(Ok(res)).await.unwrap();
+            });
+        }
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn send_payment_sync(
