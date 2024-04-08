@@ -14,9 +14,10 @@ use crate::onchain::OnChainWallet;
 use crate::KeysFile;
 use anyhow::anyhow;
 use bitcoin::bip32::ExtendedPrivKey;
+use bitcoin::hashes::{sha256::Hash as Sha256Hash, Hash};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
-use bitcoin::secp256k1::{All, PublicKey, Secp256k1};
+use bitcoin::secp256k1::{All, PublicKey, Secp256k1, ThirtyTwoByteHash};
 use bitcoin::{BlockHash, Network, OutPoint};
 use bitcoincore_rpc::{Auth, RpcApi};
 use diesel::r2d2::{ConnectionManager, Pool};
@@ -25,16 +26,17 @@ use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId, Retry,
+    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId,
+    RecipientOnionFields, Retry,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
 };
-use lightning::ln::{ChannelId, PaymentHash};
+use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
-use lightning::routing::router::DefaultRouter;
+use lightning::routing::router::{DefaultRouter, PaymentParameters, RouteParameters};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::{EntropySource, InMemorySigner};
 use lightning::util::config::{
@@ -800,6 +802,72 @@ impl Node {
     ) -> anyhow::Result<Payment> {
         // initiate payment
         let (payment_id, payment_hash) = self.init_pay_invoice(invoice, amt_sats).await?;
+        let timeout: u64 = timeout_secs.unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+
+        self.await_payment(payment_id, payment_hash, timeout).await
+    }
+
+    pub async fn init_keysend(
+        &self,
+        node_id: PublicKey,
+        amount_msats: u64,
+        custom_tlvs: Vec<(u64, Vec<u8>)>,
+    ) -> anyhow::Result<(PaymentId, PaymentHash)> {
+        let payment_secret = PaymentSecret(self.keys_manager.get_secure_random_bytes());
+        let preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
+        let payment_hash = Sha256Hash::hash(&preimage.0);
+
+        let payment_params = PaymentParameters::for_keysend(node_id, 40, false);
+        let route_params: RouteParameters = RouteParameters {
+            final_value_msat: amount_msats,
+            payment_params,
+            max_total_routing_fee_msat: None,
+        };
+
+        let recipient_onion = if custom_tlvs.is_empty() {
+            RecipientOnionFields::secret_only(payment_secret)
+        } else {
+            RecipientOnionFields::secret_only(payment_secret)
+                .with_custom_tlvs(custom_tlvs)
+                .map_err(|_| anyhow::anyhow!("Invalid custom TLVs"))?
+        };
+
+        let payment_id = PaymentId(payment_hash.into_32());
+        let payment_hash = self
+            .channel_manager
+            .send_spontaneous_payment_with_retry(
+                Some(preimage),
+                recipient_onion,
+                payment_id,
+                route_params,
+                Retry::Timeout(Duration::from_secs(30)),
+            )
+            .map_err(|e| anyhow::anyhow!("Error sending keysend: {e:?}"))?;
+
+        let mut conn = self.db_pool.get()?;
+        Payment::create(
+            &mut conn,
+            payment_hash,
+            amount_msats as i32,
+            Some(node_id),
+            None,
+            None,
+        )?;
+
+        Ok((payment_id, payment_hash))
+    }
+
+    pub async fn keysend_with_timeout(
+        &self,
+        node_id: PublicKey,
+        amount_msats: u64,
+        custom_tlvs: Vec<(u64, Vec<u8>)>,
+        timeout_secs: Option<u64>,
+    ) -> anyhow::Result<Payment> {
+        // initiate payment
+        let (payment_id, payment_hash) = self
+            .init_keysend(node_id, amount_msats, custom_tlvs)
+            .await?;
         let timeout: u64 = timeout_secs.unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
 
         self.await_payment(payment_id, payment_hash, timeout).await

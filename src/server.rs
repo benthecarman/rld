@@ -884,19 +884,29 @@ impl Lightning for Node {
     ) -> Result<Response<SendResponse>, Status> {
         let req = request.into_inner();
 
-        if req.amt > 0 && req.amt_msat > 0 {
+        let amount_msats = if req.amt > 0 && req.amt_msat > 0 {
             return Err(Status::invalid_argument("Cannot have amt and amt_msat"));
-        }
+        } else if req.amt_msat > 0 {
+            Some(req.amt_msat as u64)
+        } else if req.amt > 0 {
+            Some(req.amt as u64 * 1_000)
+        } else {
+            None
+        };
 
-        if let Ok(invoice) = Bolt11Invoice::from_str(&req.payment_request) {
-            let amount_msats = if req.amt_msat > 0 {
-                Some(req.amt_msat as u64)
-            } else if req.amt > 0 {
-                Some(req.amt as u64 * 1_000)
-            } else {
-                None
-            };
+        let result = if req.payment_request.is_empty() {
+            if amount_msats.is_none() {
+                return Err(Status::invalid_argument("amt or amt_msat is required"));
+            }
 
+            let node_id = PublicKey::from_slice(&req.dest)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+
+            let tlvs = req.dest_custom_records.into_iter().collect_vec();
+
+            self.keysend_with_timeout(node_id, amount_msats.unwrap(), tlvs, Some(5 * 60)) // default 5 minute timeout
+                .await
+        } else if let Ok(invoice) = Bolt11Invoice::from_str(&req.payment_request) {
             if invoice
                 .amount_milli_satoshis()
                 .is_some_and(|a| a != amount_msats.unwrap_or(a))
@@ -907,67 +917,62 @@ impl Lightning for Node {
             }
 
             let payment_hash = invoice.payment_hash().as_byte_array().to_vec();
-            let response: SendResponse = match self
-                .pay_invoice_with_timeout(invoice, amount_msats, Some(5 * 60)) // default 5 minute timeout
+            self.pay_invoice_with_timeout(invoice, amount_msats, Some(5 * 60)) // default 5 minute timeout
                 .await
-            {
-                Ok(payment) => {
-                    let hops: Vec<Hop> = payment
-                        .path()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|hop| Hop {
-                            chan_id: hop.short_channel_id,
-                            chan_capacity: 0,
-                            amt_to_forward: 0,
-                            fee: (hop.fee_msat / 1_000) as i64,
-                            expiry: hop.cltv_expiry_delta,
-                            amt_to_forward_msat: 0,
-                            fee_msat: hop.fee_msat as i64,
-                            pub_key: hop.pubkey.to_string(),
-                            tlv_payload: false,
-                            mpp_record: None,
-                            amp_record: None,
-                            custom_records: Default::default(),
-                            metadata: vec![],
-                        })
-                        .collect();
+        } else {
+            return Err(Status::invalid_argument("Invalid payment params"));
+        };
 
-                    let total_time_lock = hops.iter().map(|h| h.expiry).sum::<u32>();
+        let res = match result {
+            Ok(payment) => {
+                let hops: Vec<Hop> = payment
+                    .path()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|hop| Hop {
+                        chan_id: hop.short_channel_id,
+                        chan_capacity: 0,
+                        amt_to_forward: 0,
+                        fee: (hop.fee_msat / 1_000) as i64,
+                        expiry: hop.cltv_expiry_delta,
+                        amt_to_forward_msat: 0,
+                        fee_msat: hop.fee_msat as i64,
+                        pub_key: hop.pubkey.to_string(),
+                        tlv_payload: false,
+                        mpp_record: None,
+                        amp_record: None,
+                        custom_records: Default::default(),
+                        metadata: vec![],
+                    })
+                    .collect();
 
-                    let payment_route = Route {
-                        total_time_lock,
-                        total_fees: payment.fee_msats.unwrap_or_default() as i64 / 1_000,
-                        total_amt: payment.amount_msats as i64 / 1_000,
-                        hops,
-                        total_fees_msat: payment.amount_msats as i64,
-                        total_amt_msat: payment.amount_msats as i64,
-                    };
+                let total_time_lock = hops.iter().map(|h| h.expiry).sum::<u32>();
 
-                    SendResponse {
-                        payment_error: "".to_string(),
-                        payment_preimage: payment
-                            .preimage()
-                            .map(|p| p.to_vec())
-                            .unwrap_or_default(),
-                        payment_route: None,
-                        payment_hash,
-                    }
-                }
-                Err(e) => SendResponse {
-                    payment_error: e.to_string(),
-                    payment_preimage: vec![],
+                let payment_route = Route {
+                    total_time_lock,
+                    total_fees: payment.fee_msats.unwrap_or_default() as i64 / 1_000,
+                    total_amt: payment.amount_msats as i64 / 1_000,
+                    hops,
+                    total_fees_msat: payment.amount_msats as i64,
+                    total_amt_msat: payment.amount_msats as i64,
+                };
+
+                SendResponse {
+                    payment_error: "".to_string(),
+                    payment_preimage: payment.preimage().map(|p| p.to_vec()).unwrap_or_default(),
                     payment_route: None,
-                    payment_hash,
-                },
-            };
+                    payment_hash: payment.payment_hash().to_vec(),
+                }
+            }
+            Err(e) => SendResponse {
+                payment_error: e.to_string(),
+                payment_preimage: vec![],
+                payment_route: None,
+                payment_hash: vec![],
+            },
+        };
 
-            return Ok(Response::new(response));
-        }
-
-        Err(Status::unimplemented(
-            "only paying invoices is supported for now",
-        ))
+        Ok(Response::new(res))
     }
 
     type SendToRouteStream = ReceiverStream<Result<SendResponse, Status>>;
