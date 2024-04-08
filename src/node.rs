@@ -888,7 +888,7 @@ impl Node {
         }
     }
 
-    async fn await_chan_funding_tx(
+    pub(crate) async fn await_chan_funding_tx(
         &self,
         user_channel_id: u128,
         pubkey: &PublicKey,

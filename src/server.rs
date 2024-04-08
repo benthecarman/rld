@@ -31,6 +31,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -829,7 +830,95 @@ impl Lightning for Node {
         &self,
         request: Request<OpenChannelRequest>,
     ) -> Result<Response<Self::OpenChannelStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        let req = request.into_inner();
+
+        let pk = if req.node_pubkey_string.is_empty() {
+            PublicKey::from_slice(&req.node_pubkey)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?
+        } else {
+            PublicKey::from_str(&req.node_pubkey_string)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<OpenStatusUpdate, Status>>(128);
+
+        let fee_rate = if req.sat_per_vbyte > 0 {
+            Some(req.sat_per_vbyte as i32)
+        } else {
+            None
+        };
+
+        // todo handle a bunch of other flags
+        let (channel_id, id) = self
+            .init_open_channel(
+                pk,
+                req.local_funding_amount as u64,
+                req.push_sat as u64 * 1_000,
+                fee_rate,
+                req.private,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let outpoint = self
+            .await_chan_funding_tx(id, &pk, 30)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let pending_update = PendingUpdate {
+            txid: outpoint.txid.encode(),
+            output_index: outpoint.vout,
+        };
+        let update = OpenStatusUpdate {
+            pending_chan_id: channel_id.0.to_vec(),
+            update: Some(open_status_update::Update::ChanPending(pending_update)),
+        };
+
+        tx.send(Ok(update))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let cm = self.channel_manager.clone();
+        tokio::spawn(async move {
+            // wait for confirmations
+            // todo could use the event manager for this
+            loop {
+                if tx.is_closed() {
+                    break;
+                }
+
+                if let Some(chan) = cm
+                    .list_channels_with_counterparty(&pk)
+                    .iter()
+                    .find(|c| c.funding_txo.map(|f| f.into_bitcoin_outpoint()) == Some(outpoint))
+                {
+                    if chan.confirmations_required.unwrap_or(0) <= chan.confirmations.unwrap_or(0) {
+                        break;
+                    }
+                }
+                sleep(Duration::from_secs(5)).await;
+            }
+
+            let resp = ChannelPoint {
+                output_index: outpoint.vout,
+                funding_txid: Some(FundingTxid::FundingTxidStr(outpoint.txid.to_string())),
+            };
+            let open_update = ChannelOpenUpdate {
+                channel_point: Some(resp),
+            };
+            let update = OpenStatusUpdate {
+                pending_chan_id: channel_id.0.to_vec(),
+                update: Some(open_status_update::Update::ChanOpen(open_update)),
+            };
+
+            if tx.is_closed() {
+                return;
+            }
+
+            tx.send(Ok(update)).await.unwrap();
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn batch_open_channel(
