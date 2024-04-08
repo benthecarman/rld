@@ -157,7 +157,7 @@ pub struct Node {
     pub(crate) logger: Arc<RldLogger>,
     pub(crate) secp: Secp256k1<All>,
     pub(crate) db_pool: Pool<ConnectionManager<PgConnection>>,
-    stop_listen_connect: Arc<AtomicBool>,
+    pub(crate) stop_listen_connect: Arc<AtomicBool>,
     background_processor: tokio::sync::watch::Receiver<Result<(), std::io::Error>>,
     bp_exit: Arc<tokio::sync::watch::Sender<()>>,
 

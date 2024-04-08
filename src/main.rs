@@ -23,10 +23,12 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Status};
 
@@ -166,10 +168,13 @@ async fn main() -> anyhow::Result<()> {
             _ = int_signal.recv() => {
                 log_info!(l, "Received SIGINT");
             },
+            _ = when_true(stop.clone()) => {
+                log_info!(l, "Shutting down due to stop signal");
+            }
         }
 
         let _ = tx.send(());
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop.store(true, Ordering::Relaxed);
     });
 
     let socket_addr = SocketAddr::from_str(&format!("{}:{}", config.rpc_bind, config.rpc_port))?;
@@ -193,6 +198,14 @@ async fn main() -> anyhow::Result<()> {
 
     log_info!(node.logger, "Shut down complete");
     Ok(())
+}
+
+fn when_true(switch: Arc<AtomicBool>) -> impl std::future::Future {
+    tokio::task::spawn(async move {
+        while !switch.load(Ordering::Relaxed) {
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -29,6 +29,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -1216,11 +1217,10 @@ impl Lightning for Node {
         Err(Status::unimplemented("")) // todo
     }
 
-    async fn stop_daemon(
-        &self,
-        request: Request<StopRequest>,
-    ) -> Result<Response<StopResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+    async fn stop_daemon(&self, _: Request<StopRequest>) -> Result<Response<StopResponse>, Status> {
+        self.stop_listen_connect.store(true, Ordering::Relaxed);
+
+        Ok(Response::new(StopResponse {}))
     }
 
     type SubscribeChannelGraphStream = ReceiverStream<Result<GraphTopologyUpdate, Status>>;
