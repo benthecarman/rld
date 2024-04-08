@@ -288,27 +288,6 @@ impl Node {
         ));
 
         // Step 11: Initialize the ChannelManager
-        let user_config = UserConfig {
-            channel_handshake_config: ChannelHandshakeConfig {
-                negotiate_scid_privacy: true,
-                negotiate_anchors_zero_fee_htlc_tx: true,
-                ..Default::default()
-            },
-            channel_handshake_limits: ChannelHandshakeLimits {
-                force_announced_channel_preference: false,
-                ..Default::default()
-            },
-            channel_config: ChannelConfig {
-                forwarding_fee_proportional_millionths: 10_000,
-                accept_underpaying_htlcs: false,
-                ..Default::default()
-            },
-            accept_forwards_to_priv_channels: true,
-            accept_inbound_channels: true,
-            manually_accept_inbound_channels: true,
-            accept_mpp_keysend: true,
-            ..Default::default()
-        };
         let mut restarting_node = true;
         let (channel_manager_block_hash, channel_manager) = {
             if let Ok(mut f) = fs::File::open(ldk_data_dir.join("manager")) {
@@ -325,7 +304,7 @@ impl Node {
                     broadcaster.clone(),
                     router,
                     logger.clone(),
-                    user_config,
+                    default_user_config(),
                     channel_monitor_mut_references,
                 );
                 <(BlockHash, ChannelManager)>::read(&mut f, read_args).map_err(|e| {
@@ -352,7 +331,7 @@ impl Node {
                     keys_manager.clone(),
                     keys_manager.clone(),
                     keys_manager.clone(),
-                    user_config,
+                    default_user_config(),
                     chain_params,
                     cur.as_secs() as u32,
                 );
@@ -973,19 +952,22 @@ impl Node {
         amount_sat: u64,
         push_msat: u64,
         sats_per_vbyte: Option<i32>,
+        private: bool,
     ) -> anyhow::Result<(ChannelId, u128)> {
         // save params to db
         let mut conn = self.db_pool.get()?;
         let params = ChannelOpenParam::create(&mut conn, sats_per_vbyte)?;
 
         let user_channel_id: u128 = params.id.try_into()?;
+        let mut config = default_user_config();
+        config.channel_handshake_config.announced_channel = !private;
         match self.channel_manager.create_channel(
             pubkey,
             amount_sat,
             push_msat,
             user_channel_id,
             None,
-            None,
+            Some(config),
         ) {
             Ok(channel_id) => {
                 log_info!(
@@ -1012,12 +994,38 @@ impl Node {
         amount_sat: u64,
         push_msat: u64,
         sats_per_vbyte: Option<i32>,
+        private: bool,
         timeout: u64,
     ) -> anyhow::Result<OutPoint> {
         let (_, id) = self
-            .init_open_channel(pubkey, amount_sat, push_msat, sats_per_vbyte)
+            .init_open_channel(pubkey, amount_sat, push_msat, sats_per_vbyte, private)
             .await?;
 
         self.await_chan_funding_tx(id, &pubkey, timeout).await
+    }
+}
+
+fn default_user_config() -> UserConfig {
+    UserConfig {
+        channel_handshake_config: ChannelHandshakeConfig {
+            negotiate_scid_privacy: true,
+            negotiate_anchors_zero_fee_htlc_tx: true,
+            announced_channel: false,
+            ..Default::default()
+        },
+        channel_handshake_limits: ChannelHandshakeLimits {
+            force_announced_channel_preference: false,
+            ..Default::default()
+        },
+        channel_config: ChannelConfig {
+            forwarding_fee_proportional_millionths: 10_000,
+            accept_underpaying_htlcs: false,
+            ..Default::default()
+        },
+        accept_forwards_to_priv_channels: true,
+        accept_inbound_channels: true,
+        manually_accept_inbound_channels: true,
+        accept_mpp_keysend: true,
+        ..Default::default()
     }
 }

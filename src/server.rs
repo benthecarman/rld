@@ -802,13 +802,14 @@ impl Lightning for Node {
             None
         };
 
-        // todo handle private channels
+        // todo handle a bunch of other flags
         let outpoint = self
             .open_channel_with_timeout(
                 pk,
                 req.local_funding_amount as u64,
                 req.push_sat as u64 * 1_000,
                 fee_rate,
+                req.private,
                 30,
             )
             .await
