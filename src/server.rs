@@ -410,7 +410,7 @@ impl Lightning for Node {
         &self,
         request: Request<GetTransactionsRequest>,
     ) -> Result<Response<Self::SubscribeTransactionsStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("subscribe_transactions")) // todo
     }
 
     async fn send_many(
@@ -607,7 +607,7 @@ impl Lightning for Node {
         &self,
         request: Request<PeerEventSubscription>,
     ) -> Result<Response<Self::SubscribePeerEventsStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("subscribe_peer_events")) // todo
     }
 
     async fn get_info(
@@ -774,14 +774,14 @@ impl Lightning for Node {
         &self,
         request: Request<ChannelEventSubscription>,
     ) -> Result<Response<Self::SubscribeChannelEventsStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("subscribe_channel_events")) // todo
     }
 
     async fn closed_channels(
         &self,
         request: Request<ClosedChannelsRequest>,
     ) -> Result<Response<ClosedChannelsResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("closed_channels")) // todo
     }
 
     async fn open_channel_sync(
@@ -926,14 +926,14 @@ impl Lightning for Node {
         &self,
         request: Request<BatchOpenChannelRequest>,
     ) -> Result<Response<BatchOpenChannelResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("batch_open_channel")) // todo
     }
 
     async fn funding_state_step(
         &self,
         request: Request<FundingTransitionMsg>,
     ) -> Result<Response<FundingStateStepResp>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("funding_state_step")) // todo
     }
 
     type ChannelAcceptorStream = ReceiverStream<Result<ChannelAcceptRequest, Status>>;
@@ -942,7 +942,7 @@ impl Lightning for Node {
         &self,
         request: Request<Streaming<ChannelAcceptResponse>>,
     ) -> Result<Response<Self::ChannelAcceptorStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("channel_acceptor")) // todo
     }
 
     type CloseChannelStream = ReceiverStream<Result<CloseStatusUpdate, Status>>;
@@ -951,14 +951,14 @@ impl Lightning for Node {
         &self,
         request: Request<CloseChannelRequest>,
     ) -> Result<Response<Self::CloseChannelStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("close_channel")) // todo
     }
 
     async fn abandon_channel(
         &self,
         request: Request<AbandonChannelRequest>,
     ) -> Result<Response<AbandonChannelResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("abandon_channel")) // todo
     }
 
     type SendPaymentStream = ReceiverStream<Result<SendResponse, Status>>;
@@ -1199,14 +1199,14 @@ impl Lightning for Node {
         &self,
         request: Request<Streaming<SendToRouteRequest>>,
     ) -> Result<Response<Self::SendToRouteStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("send_to_route")) // todo
     }
 
     async fn send_to_route_sync(
         &self,
         request: Request<SendToRouteRequest>,
     ) -> Result<Response<SendResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("send_to_route_sync")) // todo
     }
 
     async fn add_invoice(
@@ -1262,7 +1262,7 @@ impl Lightning for Node {
         &self,
         request: Request<ListInvoiceRequest>,
     ) -> Result<Response<ListInvoiceResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("list_invoices")) // todo
     }
 
     async fn lookup_invoice(
@@ -1375,63 +1375,63 @@ impl Lightning for Node {
         &self,
         request: Request<ListPaymentsRequest>,
     ) -> Result<Response<ListPaymentsResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("list_payments")) // todo
     }
 
     async fn delete_payment(
         &self,
         request: Request<DeletePaymentRequest>,
     ) -> Result<Response<DeletePaymentResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("delete_payment")) // todo
     }
 
     async fn delete_all_payments(
         &self,
         request: Request<DeleteAllPaymentsRequest>,
     ) -> Result<Response<DeleteAllPaymentsResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("delete_all_payments")) // todo
     }
 
     async fn describe_graph(
         &self,
         request: Request<ChannelGraphRequest>,
     ) -> Result<Response<ChannelGraph>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("describe_graph")) // todo
     }
 
     async fn get_node_metrics(
         &self,
         request: Request<NodeMetricsRequest>,
     ) -> Result<Response<NodeMetricsResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("get_node_metrics")) // todo
     }
 
     async fn get_chan_info(
         &self,
         request: Request<ChanInfoRequest>,
     ) -> Result<Response<ChannelEdge>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("get_chan_info")) // todo
     }
 
     async fn get_node_info(
         &self,
         request: Request<NodeInfoRequest>,
     ) -> Result<Response<NodeInfo>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("get_node_info")) // todo
     }
 
     async fn query_routes(
         &self,
         request: Request<QueryRoutesRequest>,
     ) -> Result<Response<QueryRoutesResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("query_routes")) // todo
     }
 
     async fn get_network_info(
         &self,
         request: Request<NetworkInfoRequest>,
     ) -> Result<Response<NetworkInfo>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("get_network_info")) // todo
     }
 
     async fn stop_daemon(&self, _: Request<StopRequest>) -> Result<Response<StopResponse>, Status> {
@@ -1446,63 +1446,63 @@ impl Lightning for Node {
         &self,
         request: Request<GraphTopologySubscription>,
     ) -> Result<Response<Self::SubscribeChannelGraphStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("subscribe_channel_graph")) // todo
     }
 
     async fn debug_level(
         &self,
         request: Request<DebugLevelRequest>,
     ) -> Result<Response<DebugLevelResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("debug_level")) // todo
     }
 
     async fn fee_report(
         &self,
         request: Request<FeeReportRequest>,
     ) -> Result<Response<FeeReportResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("fee_report")) // todo
     }
 
     async fn update_channel_policy(
         &self,
         request: Request<PolicyUpdateRequest>,
     ) -> Result<Response<PolicyUpdateResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("update_channel_policy")) // todo
     }
 
     async fn forwarding_history(
         &self,
         request: Request<ForwardingHistoryRequest>,
     ) -> Result<Response<ForwardingHistoryResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("forwarding_history")) // todo
     }
 
     async fn export_channel_backup(
         &self,
         request: Request<ExportChannelBackupRequest>,
     ) -> Result<Response<ChannelBackup>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("export_channel_backup")) // todo
     }
 
     async fn export_all_channel_backups(
         &self,
         request: Request<ChanBackupExportRequest>,
     ) -> Result<Response<ChanBackupSnapshot>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("export_all_channel_backups")) // todo
     }
 
     async fn verify_chan_backup(
         &self,
         request: Request<ChanBackupSnapshot>,
     ) -> Result<Response<VerifyChanBackupResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("verify_chan_backup")) // todo
     }
 
     async fn restore_channel_backups(
         &self,
         request: Request<RestoreChanBackupRequest>,
     ) -> Result<Response<RestoreBackupResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("restore_channel_backups")) // todo
     }
 
     type SubscribeChannelBackupsStream = ReceiverStream<Result<ChanBackupSnapshot, Status>>;
@@ -1511,42 +1511,42 @@ impl Lightning for Node {
         &self,
         request: Request<ChannelBackupSubscription>,
     ) -> Result<Response<Self::SubscribeChannelBackupsStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("subscribe_channel_backups")) // todo
     }
 
     async fn bake_macaroon(
         &self,
         request: Request<BakeMacaroonRequest>,
     ) -> Result<Response<BakeMacaroonResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("bake_macaroon")) // todo
     }
 
     async fn list_macaroon_i_ds(
         &self,
         request: Request<ListMacaroonIDsRequest>,
     ) -> Result<Response<ListMacaroonIDsResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("list_macaroon_i_ds")) // todo
     }
 
     async fn delete_macaroon_id(
         &self,
         request: Request<DeleteMacaroonIdRequest>,
     ) -> Result<Response<DeleteMacaroonIdResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("delete_macaroon_id")) // todo
     }
 
     async fn list_permissions(
         &self,
         request: Request<ListPermissionsRequest>,
     ) -> Result<Response<ListPermissionsResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("list_permissions")) // todo
     }
 
     async fn check_macaroon_permissions(
         &self,
         request: Request<CheckMacPermRequest>,
     ) -> Result<Response<CheckMacPermResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("check_macaroon_permissions")) // todo
     }
 
     type RegisterRPCMiddlewareStream = ReceiverStream<Result<RpcMiddlewareRequest, Status>>;
@@ -1555,14 +1555,14 @@ impl Lightning for Node {
         &self,
         request: Request<Streaming<RpcMiddlewareResponse>>,
     ) -> Result<Response<Self::RegisterRPCMiddlewareStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("register_rpc_middleware")) // todo
     }
 
     async fn send_custom_message(
         &self,
         request: Request<SendCustomMessageRequest>,
     ) -> Result<Response<SendCustomMessageResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("send_custom_message")) // todo
     }
 
     type SubscribeCustomMessagesStream = ReceiverStream<Result<CustomMessage, Status>>;
@@ -1571,21 +1571,21 @@ impl Lightning for Node {
         &self,
         request: Request<SubscribeCustomMessagesRequest>,
     ) -> Result<Response<Self::SubscribeCustomMessagesStream>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("subscribe_custom_messages")) // todo
     }
 
     async fn list_aliases(
         &self,
         request: Request<ListAliasesRequest>,
     ) -> Result<Response<ListAliasesResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("list_aliases")) // todo
     }
 
     async fn lookup_htlc_resolution(
         &self,
         request: Request<LookupHtlcResolutionRequest>,
     ) -> Result<Response<LookupHtlcResolutionResponse>, Status> {
-        Err(Status::unimplemented("")) // todo
+        Err(Status::unimplemented("lookup_htlc_resolution")) // todo
     }
 }
 
