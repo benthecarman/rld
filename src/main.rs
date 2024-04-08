@@ -7,8 +7,10 @@ use crate::models::MIGRATIONS;
 use crate::node::Node;
 use crate::proto::lightning_server::LightningServer;
 use bip39::Mnemonic;
+use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::Network;
 use clap::Parser;
 use diesel::r2d2::{ConnectionManager, Pool};
@@ -100,29 +102,28 @@ async fn main() -> anyhow::Result<()> {
 
     let tls_config = ServerTlsConfig::new().identity(Identity::from_pem(&cert, &tls_key));
 
-    let macaroon_key_path = path.clone().join("macaroon_key");
+    let keys = KeysFile::read(&path.join("keys.json"), config.network(), &logger)?;
+    let seed = keys.seed.to_seed_normalized("");
+    let xpriv = ExtendedPrivKey::new_master(config.network(), &seed)?;
 
-    let mac_key = match fs::read(&macaroon_key_path) {
-        Ok(bytes) => {
-            let arr: [u8; 32] = bytes.as_slice().try_into()?;
-            MacaroonKey::from(arr)
-        }
+    let derv_path = DerivationPath::from_str("m/1234'/5678'")?;
+    let mac_root_key = xpriv.derive_priv(&Secp256k1::signing_only(), &derv_path)?;
+    let mac_key = MacaroonKey::from(&mac_root_key.private_key.secret_bytes());
+
+    match fs::read(&path.join("admin.macaroon")) {
+        Ok(_) => {}
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
                 return Err(e.into());
             } else {
                 log_info!(logger, "Generating admin macaroon");
-                let mac_key = MacaroonKey::generate_random();
                 let macaroon = Macaroon::create(Some("rld".into()), &mac_key, "admin".into())?;
 
-                fs::write(&macaroon_key_path, mac_key)?;
-
-                let macaroon_base64 = macaroon.serialize(Format::V1)?;
+                let macaroon_base64 = macaroon.serialize(Format::V2)?;
                 // base64 decode to get raw bytes
                 let macaroon_bytes = base64::decode_config(macaroon_base64, base64::URL_SAFE)?;
                 let admin_macaroon_path = path.join("admin.macaroon");
                 fs::write(admin_macaroon_path, macaroon_bytes)?;
-                mac_key
             }
         }
     };
@@ -147,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = oneshot::channel();
 
     let stop = Arc::new(AtomicBool::new(false));
-    let node = Node::new(&config, db_pool, logger, stop.clone()).await?;
+    let node = Node::new(&config, xpriv, db_pool, logger, stop.clone()).await?;
 
     // Spawn a task to listen for shutdown signals
     let l = node.logger.clone();

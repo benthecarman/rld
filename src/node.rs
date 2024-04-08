@@ -11,7 +11,6 @@ use crate::models::invoice::Invoice;
 use crate::models::payment::{Payment, PaymentStatus};
 use crate::models::CreatedInvoice;
 use crate::onchain::OnChainWallet;
-use crate::KeysFile;
 use anyhow::anyhow;
 use bitcoin::bip32::ExtendedPrivKey;
 use bitcoin::hashes::{sha256::Hash as Sha256Hash, Hash};
@@ -169,13 +168,12 @@ pub struct Node {
 impl Node {
     pub async fn new(
         config: &Config,
+        xpriv: ExtendedPrivKey,
         db_pool: Pool<ConnectionManager<PgConnection>>,
         logger: Arc<RldLogger>,
         stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Node> {
         let path = PathBuf::from(&config.data_dir);
-
-        let keys = KeysFile::read(&path.join("keys.json"), config.network(), &logger)?;
 
         let bitcoind_auth = Auth::UserPass(
             config.bitcoind_rpc_user.clone(),
@@ -194,9 +192,6 @@ impl Node {
         }
 
         let fee_estimator = Arc::new(RldFeeEstimator::new(bitcoind.clone())?);
-
-        let seed = keys.seed.to_seed_normalized("");
-        let xpriv = ExtendedPrivKey::new_master(network, &seed)?;
 
         let wallet = Arc::new(OnChainWallet::new(
             xpriv,
