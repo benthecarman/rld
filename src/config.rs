@@ -68,4 +68,10 @@ impl Config {
                 port: self.port,
             })
     }
+
+    pub fn alias(&self) -> &str {
+        self.alias
+            .as_deref()
+            .unwrap_or_else(|| "Rust Lightning Daemon")
+    }
 }

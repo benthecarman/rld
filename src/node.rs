@@ -143,6 +143,7 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
 
 #[derive(Clone)]
 pub struct Node {
+    pub(crate) config: Config,
     pub(crate) peer_manager: Arc<PeerManager>,
     pub(crate) keys_manager: Arc<KeysManager>,
     pub(crate) channel_manager: Arc<ChannelManager>,
@@ -167,7 +168,7 @@ pub struct Node {
 
 impl Node {
     pub async fn new(
-        config: &Config,
+        config: Config,
         xpriv: ExtendedPrivKey,
         db_pool: Pool<ConnectionManager<PgConnection>>,
         logger: Arc<RldLogger>,
@@ -575,11 +576,7 @@ impl Node {
         let peer_man = Arc::clone(&peer_manager);
         let chan_man = Arc::clone(&channel_manager);
         let mut alias: [u8; 32] = [0; 32];
-        let bytes = config
-            .alias
-            .as_deref()
-            .unwrap_or("Rust Lightning Daemon")
-            .as_bytes();
+        let bytes = config.alias().as_bytes();
         let len = bytes.len().min(alias.len());
         alias[..len].copy_from_slice(&bytes[..len]);
         let list_address = config.list_address();
@@ -605,6 +602,7 @@ impl Node {
         // todo reconnect to peers
 
         let node = Node {
+            config,
             peer_manager,
             keys_manager,
             channel_manager,

@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, rx) = oneshot::channel();
 
     let stop = Arc::new(AtomicBool::new(false));
-    let node = Node::new(&config, xpriv, db_pool, logger, stop.clone()).await?;
+    let node = Node::new(config.clone(), xpriv, db_pool, logger, stop.clone()).await?;
 
     // Spawn a task to listen for shutdown signals
     let l = node.logger.clone();

@@ -629,7 +629,7 @@ impl Lightning for Node {
                 .get_node_id(Recipient::Node)
                 .expect("this is safe")
                 .to_string(),
-            alias: "".to_string(),
+            alias: self.config.alias().to_string(),
             color: "#000000".to_string(),
             num_pending_channels: channels.iter().filter(|c| !c.is_channel_ready).count() as u32,
             num_active_channels: channels.iter().filter(|c| c.is_usable).count() as u32,
