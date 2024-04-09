@@ -16,7 +16,7 @@ use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::{Message, PublicKey};
-use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut};
+use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
 use lightning::ln::channelmanager::{PaymentId, Retry};
@@ -951,7 +951,124 @@ impl Lightning for Node {
         &self,
         request: Request<CloseChannelRequest>,
     ) -> Result<Response<Self::CloseChannelStream>, Status> {
-        Err(Status::unimplemented("close_channel")) // todo
+        let req = request.into_inner();
+
+        let channel_point = match req.channel_point {
+            Some(point) => match point.funding_txid {
+                Some(FundingTxid::FundingTxidStr(txid)) => {
+                    let txid = Txid::from_str(&txid)
+                        .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+                    lightning::chain::transaction::OutPoint {
+                        txid,
+                        index: point.output_index as u16,
+                    }
+                }
+                Some(FundingTxid::FundingTxidBytes(txid)) => {
+                    let txid = Txid::from_slice(&txid)
+                        .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+                    lightning::chain::transaction::OutPoint {
+                        txid,
+                        index: point.output_index as u16,
+                    }
+                }
+                None => return Err(Status::invalid_argument("funding_txid is required")),
+            },
+            None => return Err(Status::invalid_argument("channel_point is required")),
+        };
+
+        let chan = self
+            .channel_manager
+            .list_channels()
+            .into_iter()
+            .find(|c| c.funding_txo == Some(channel_point))
+            .ok_or(Status::invalid_argument("Channel not found"))?;
+
+        let res = if req.force {
+            self.channel_manager
+                .force_close_broadcasting_latest_txn(&chan.channel_id, &chan.counterparty.node_id)
+        } else if req.delivery_address.is_empty() {
+            self.channel_manager
+                .close_channel(&chan.channel_id, &chan.counterparty.node_id)
+        } else {
+            let address = Address::from_str(&req.delivery_address)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?
+                .require_network(self.network)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+            let script = address
+                .payload
+                .script_pubkey()
+                .try_into()
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+            self.channel_manager.close_channel_with_feerate_and_script(
+                &chan.channel_id,
+                &chan.counterparty.node_id,
+                None,
+                Some(script),
+            )
+        };
+        res.map_err(|e| Status::invalid_argument(format!("API error: {e:?}")))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<CloseStatusUpdate, Status>>(5);
+
+        let bitcoind = self.bitcoind.clone();
+        let chain_monitor = self.chain_monitor.clone();
+        tokio::spawn(async move {
+            let mut closing_txid: Option<Txid> = None;
+            loop {
+                if tx.is_closed() {
+                    return;
+                }
+
+                let mut resp: Option<CloseStatusUpdate> = None;
+                if let Ok(chan) = chain_monitor.get_monitor(channel_point) {
+                    if let Some((txid, _, _)) = chan.get_relevant_txids().first() {
+                        let update = close_status_update::Update::ClosePending(PendingUpdate {
+                            txid: txid.encode(),
+                            output_index: 0, // todo this is wrong
+                        });
+                        resp = Some(CloseStatusUpdate {
+                            update: Some(update),
+                        });
+                        closing_txid = Some(*txid);
+                    }
+                };
+
+                if let Some(resp) = resp {
+                    tx.send(Ok(resp)).await.unwrap();
+                    break;
+                }
+
+                sleep(Duration::from_secs(5)).await;
+            }
+
+            if closing_txid.is_none() {
+                return;
+            }
+
+            loop {
+                if tx.is_closed() {
+                    return;
+                }
+
+                if let Ok(info) = bitcoind.get_raw_transaction_info(&closing_txid.unwrap(), None) {
+                    if info.confirmations.unwrap_or(0) >= 6 {
+                        let update = close_status_update::Update::ChanClose(ChannelCloseUpdate {
+                            closing_txid: closing_txid.encode(),
+                            success: true,
+                        });
+                        let resp = CloseStatusUpdate {
+                            update: Some(update),
+                        };
+                        tx.send(Ok(resp)).await.unwrap();
+                        return;
+                    }
+                }
+
+                sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     async fn abandon_channel(
@@ -1076,7 +1193,10 @@ impl Lightning for Node {
 
                         SendResponse {
                             payment_error: "".to_string(),
-                            payment_preimage: payment.preimage().map(|p| p.to_vec()).unwrap_or_default(),
+                            payment_preimage: payment
+                                .preimage()
+                                .map(|p| p.to_vec())
+                                .unwrap_or_default(),
                             payment_route: None,
                             payment_hash: payment.payment_hash().to_vec(),
                         }
