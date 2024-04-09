@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let mac_root_key = xpriv.derive_priv(&Secp256k1::signing_only(), &derv_path)?;
     let mac_key = MacaroonKey::from(&mac_root_key.private_key.secret_bytes());
 
-    match fs::read(&path.join("admin.macaroon")) {
+    match fs::read(path.join("admin.macaroon")) {
         Ok(_) => {}
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {

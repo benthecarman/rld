@@ -72,6 +72,6 @@ impl Config {
     pub fn alias(&self) -> &str {
         self.alias
             .as_deref()
-            .unwrap_or_else(|| "Rust Lightning Daemon")
+            .unwrap_or("Rust Lightning Daemon")
     }
 }
