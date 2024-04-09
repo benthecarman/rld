@@ -25,7 +25,7 @@ pub enum InvoiceStatus {
     PartialEq,
     Eq,
 )]
-#[diesel(primary_key(payment_hash))]
+#[diesel(primary_key(id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Invoice {
     pub id: i32,

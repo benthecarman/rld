@@ -35,7 +35,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    payments (payment_hash) {
+    payments (id) {
+        id -> Int4,
         payment_hash -> Bytea,
         preimage -> Nullable<Bytea>,
         amount_msats -> Int4,

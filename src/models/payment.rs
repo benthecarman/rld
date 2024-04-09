@@ -28,10 +28,11 @@ pub enum PaymentStatus {
     PartialEq,
     Eq,
 )]
-#[diesel(primary_key(payment_hash))]
+#[diesel(primary_key(id))]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Payment {
-    payment_hash: Vec<u8>,
+    pub id: i32,
+    pub(crate) payment_hash: Vec<u8>,
     preimage: Option<Vec<u8>>,
     pub amount_msats: i32,
     pub fee_msats: Option<i32>,
@@ -41,7 +42,7 @@ pub struct Payment {
     status: i16,
     path: Option<Vec<u8>>,
     blinded_tail: Option<Vec<u8>>,
-    created_at: chrono::NaiveDateTime,
+    pub created_at: chrono::NaiveDateTime,
     updated_at: chrono::NaiveDateTime,
 }
 
@@ -221,5 +222,9 @@ impl Payment {
         .get_result(conn)?;
 
         Ok(res)
+    }
+
+    pub fn list_payments(conn: &mut PgConnection) -> anyhow::Result<Vec<Payment>> {
+        Ok(payments::table.load(conn)?)
     }
 }

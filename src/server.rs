@@ -35,6 +35,7 @@ use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::codegen::tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
+use crate::models::payment::PaymentStatus;
 
 #[tonic::async_trait]
 impl Lightning for Node {
@@ -1493,9 +1494,50 @@ impl Lightning for Node {
 
     async fn list_payments(
         &self,
-        request: Request<ListPaymentsRequest>,
+        _: Request<ListPaymentsRequest>, // todo use request
     ) -> Result<Response<ListPaymentsResponse>, Status> {
-        Err(Status::unimplemented("list_payments")) // todo
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let payments = crate::models::payment::Payment::list_payments(&mut conn)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let payments = payments
+            .into_iter()
+            .map(|p| {
+                let status = match p.status() {
+                    PaymentStatus::Pending => PaymentStatus::Pending,
+                    PaymentStatus::Completed => PaymentStatus::Completed,
+                    PaymentStatus::Failed => PaymentStatus::Failed,
+                };
+                Payment {
+                    payment_preimage: p.preimage().map(|p| hex::encode(p)).unwrap_or_default(),
+                    payment_request: p.bolt11().map(|b| b.to_string()).unwrap_or_default(),
+                    payment_hash: hex::encode(p.payment_hash),
+                    value: 0,
+                    creation_date: 0,
+                    fee: 0,
+                    value_sat: (p.amount_msats / 1000) as i64,
+                    value_msat: p.amount_msats as i64,
+                    payment_index: p.id as u64,
+                    fee_sat: p.fee_msats.unwrap_or_default() as i64 / 1000,
+                    fee_msat: p.fee_msats.unwrap_or_default() as i64,
+                    creation_time_ns: p.created_at.timestamp_nanos(),
+                    status: status as i32,
+                    htlcs: vec![],
+                    failure_reason: 0, // todo
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok(Response::new(ListPaymentsResponse {
+            total_num_payments: payments.len() as u64,
+            payments,
+            first_index_offset: 0,
+            last_index_offset: 0,
+        }))
     }
 
     async fn delete_payment(

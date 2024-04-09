@@ -16,18 +16,19 @@ create index invoice_status_index on invoices (status);
 
 CREATE TABLE payments
 (
-    payment_hash       bytea PRIMARY KEY NOT NULL,
+    id                 SERIAL PRIMARY KEY,
+    payment_hash       bytea     NOT NULL,
     preimage           bytea UNIQUE,
-    amount_msats       INTEGER           NOT NULL,
+    amount_msats       INTEGER   NOT NULL,
     fee_msats          INTEGER,
     destination_pubkey bytea, -- keysend
     bolt11             TEXT UNIQUE,
     bolt12             TEXT,
-    status             SMALLINT          NOT NULL,
+    status             SMALLINT  NOT NULL,
     path               bytea,
     blinded_tail       bytea,
-    created_at         timestamp         NOT NULL DEFAULT NOW(),
-    updated_at         timestamp         NOT NULL DEFAULT NOW()
+    created_at         timestamp NOT NULL DEFAULT NOW(),
+    updated_at         timestamp NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE channel_open_params
