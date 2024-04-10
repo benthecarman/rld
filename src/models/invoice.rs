@@ -34,8 +34,8 @@ pub struct Invoice {
     bolt11: String,
     pub amount_msats: Option<i32>,
     pub status: i16,
-    created_at: chrono::NaiveDateTime,
-    updated_at: chrono::NaiveDateTime,
+    pub created_at: chrono::NaiveDateTime,
+    pub updated_at: chrono::NaiveDateTime,
 }
 
 #[derive(Insertable, AsChangeset)]
@@ -133,5 +133,33 @@ impl Invoice {
         };
 
         Ok(res)
+    }
+
+    pub fn mark_as_expired(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+    ) -> anyhow::Result<Self> {
+        let res = diesel::update(invoices::table)
+            .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
+            .set(invoices::status.eq(InvoiceStatus::Expired as i16))
+            .get_result(conn)?;
+
+        Ok(res)
+    }
+
+    pub fn mark_as_held(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+    ) -> anyhow::Result<Self> {
+        let res = diesel::update(invoices::table)
+            .filter(invoices::payment_hash.eq(payment_hash.as_slice()))
+            .set(invoices::status.eq(InvoiceStatus::Held as i16))
+            .get_result(conn)?;
+
+        Ok(res)
+    }
+
+    pub fn find_all(conn: &mut PgConnection) -> anyhow::Result<Vec<Invoice>> {
+        Ok(invoices::table.load(conn)?)
     }
 }

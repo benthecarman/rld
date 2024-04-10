@@ -2,6 +2,7 @@
 #![allow(unused)]
 
 use crate::models::invoice::InvoiceStatus;
+use crate::models::payment::PaymentStatus;
 use crate::models::CreatedInvoice;
 use crate::node::Node;
 use crate::proto::channel_point::FundingTxid;
@@ -15,7 +16,7 @@ use bitcoin::consensus::serialize;
 use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
-use bitcoin::secp256k1::{Message, PublicKey};
+use bitcoin::secp256k1::{Message, PublicKey, ThirtyTwoByteHash};
 use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
@@ -35,7 +36,6 @@ use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::codegen::tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
-use crate::models::payment::PaymentStatus;
 
 #[tonic::async_trait]
 impl Lightning for Node {
@@ -1381,9 +1381,25 @@ impl Lightning for Node {
 
     async fn list_invoices(
         &self,
-        request: Request<ListInvoiceRequest>,
+        _: Request<ListInvoiceRequest>, // todo pagination
     ) -> Result<Response<ListInvoiceResponse>, Status> {
-        Err(Status::unimplemented("list_invoices")) // todo
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let invoices = crate::models::invoice::Invoice::find_all(&mut conn)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let invoices = invoices.into_iter().map(invoice_to_lnrpc_invoice).collect();
+
+        let resp = ListInvoiceResponse {
+            invoices,
+            last_index_offset: 0,
+            first_index_offset: 0,
+        };
+
+        Ok(Response::new(resp))
     }
 
     async fn lookup_invoice(
