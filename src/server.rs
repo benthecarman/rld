@@ -1523,17 +1523,13 @@ impl Lightning for Node {
         let payments = payments
             .into_iter()
             .map(|p| {
-                let status = match p.status() {
-                    PaymentStatus::Pending => PaymentStatus::Pending,
-                    PaymentStatus::Completed => PaymentStatus::Completed,
-                    PaymentStatus::Failed => PaymentStatus::Failed,
-                };
+                let status = p.status();
                 Payment {
-                    payment_preimage: p.preimage().map(|p| hex::encode(p)).unwrap_or_default(),
+                    payment_preimage: p.preimage().map(hex::encode).unwrap_or_default(),
                     payment_request: p.bolt11().map(|b| b.to_string()).unwrap_or_default(),
                     payment_hash: hex::encode(p.payment_hash),
                     value: 0,
-                    creation_date: 0,
+                    creation_date: p.created_at.and_utc().timestamp(),
                     fee: 0,
                     value_sat: (p.amount_msats / 1000) as i64,
                     value_msat: p.amount_msats as i64,
