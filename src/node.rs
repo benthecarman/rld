@@ -7,7 +7,7 @@ use crate::logger::RldLogger;
 use crate::models;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
-use crate::models::invoice::Invoice;
+use crate::models::receive::Receive;
 use crate::models::payment::{Payment, PaymentStatus};
 use crate::models::CreatedInvoice;
 use crate::onchain::OnChainWallet;
@@ -162,8 +162,8 @@ pub struct Node {
     bp_exit: Arc<tokio::sync::watch::Sender<()>>,
 
     // broadcast channels
-    pub(crate) invoice_broadcast: broadcast::Sender<Invoice>,
-    pub(crate) invoice_rx: Arc<broadcast::Receiver<Invoice>>,
+    pub(crate) invoice_broadcast: broadcast::Sender<Receive>,
+    pub(crate) invoice_rx: Arc<broadcast::Receiver<Receive>>,
 }
 
 impl Node {
@@ -678,7 +678,7 @@ impl Node {
         let invoice = result.map_err(|e| anyhow!("Failed to create invoice: {e}"))?;
 
         let mut conn = self.db_pool.get()?;
-        let inv = Invoice::create(&mut conn, &invoice)?;
+        let inv = Receive::create(&mut conn, &invoice)?;
 
         let id = inv.id;
         self.invoice_broadcast.send(inv)?;

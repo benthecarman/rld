@@ -1,8 +1,8 @@
 #![allow(deprecated)]
 #![allow(unused)]
 
-use crate::models::invoice::InvoiceStatus;
 use crate::models::payment::PaymentStatus;
+use crate::models::receive::{InvoiceStatus, Receive};
 use crate::models::CreatedInvoice;
 use crate::node::Node;
 use crate::proto::channel_point::FundingTxid;
@@ -36,6 +36,7 @@ use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::codegen::tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
+use crate::models::received_htlc::ReceivedHtlc;
 
 #[tonic::async_trait]
 impl Lightning for Node {
@@ -1388,10 +1389,11 @@ impl Lightning for Node {
             .get()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let invoices = crate::models::invoice::Invoice::find_all(&mut conn)
+        let invoices = Receive::find_all(&mut conn)
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let invoices = invoices.into_iter().map(invoice_to_lnrpc_invoice).collect();
+        // todo htlcs
+        let invoices = invoices.into_iter().map(receive_to_lnrpc_invoice).collect();
 
         let resp = ListInvoiceResponse {
             invoices,
@@ -1412,12 +1414,30 @@ impl Lightning for Node {
             .db_pool
             .get()
             .map_err(|e| Status::internal(e.to_string()))?;
-        let opt = crate::models::invoice::Invoice::find_by_payment_hash(&mut conn, &req.r_hash)
+        let opt = Receive::find_by_payment_hash(&mut conn, &req.r_hash)
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match opt {
             Some(invoice) => {
-                let invoice = invoice_to_lnrpc_invoice(invoice);
+                let htlcs = ReceivedHtlc::find_by_receive_id(&mut conn, invoice.id)
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .into_iter()
+                    .map(|h| InvoiceHtlc {
+                        chan_id: 0, // todo
+                        htlc_index: h.id as u64,
+                        amt_msat: h.amount_msats as u64,
+                        accept_height: 0,
+                        accept_time: 0,
+                        resolve_time: 0,
+                        expiry_height: h.cltv_expiry as i32,
+                        state: InvoiceHtlcState::Settled as i32,
+                        custom_records: Default::default(),
+                        mpp_total_amt_msat: invoice.amount_msats.unwrap_or_default() as u64,
+                        amp: None,
+                    })
+                    .collect_vec();
+                let mut invoice = receive_to_lnrpc_invoice(invoice);
+                invoice.htlcs = htlcs;
                 Ok(Response::new(invoice))
             }
             None => Err(Status::not_found("Invoice not found")),
@@ -1438,7 +1458,8 @@ impl Lightning for Node {
                     break;
                 }
 
-                let invoice = invoice_to_lnrpc_invoice(item);
+                // todo htlcs
+                let invoice = receive_to_lnrpc_invoice(item);
                 tx.send(Ok(invoice)).await.unwrap()
             }
         });
@@ -1763,7 +1784,7 @@ impl Lightning for Node {
     }
 }
 
-fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice {
+fn receive_to_lnrpc_invoice(invoice: crate::models::receive::Receive) -> Invoice {
     let bolt11 = invoice.bolt11();
     let state: InvoiceState = match invoice.status() {
         InvoiceStatus::Pending => InvoiceState::Open,
@@ -1771,15 +1792,12 @@ fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice
         InvoiceStatus::Held => InvoiceState::Accepted,
         InvoiceStatus::Paid => InvoiceState::Settled,
     };
-    let settle_date = if state == InvoiceState::Settled {
-        invoice.updated_date()
-    } else {
-        0
-    };
 
     let route_hints = bolt11
-        .route_hints()
-        .iter()
+        .as_ref()
+        .map(|b| b.route_hints())
+        .unwrap_or_default()
+        .into_iter()
         .map(|hint| RouteHint {
             hop_hints: hint
                 .0
@@ -1793,40 +1811,52 @@ fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice
                 })
                 .collect(),
         })
-        .collect();
+        .collect::<Vec<_>>();
 
     let amt_paid_msat = if state == InvoiceState::Settled {
-        bolt11.amount_milli_satoshis().unwrap_or(0) as i64
+        invoice.amount_msats.unwrap_or_default() as i64
     } else {
         0
     };
 
-    let (memo, description_hash) = match bolt11.description() {
-        Bolt11InvoiceDescription::Direct(desc) => (desc.to_string(), vec![]),
-        Bolt11InvoiceDescription::Hash(hash) => (String::new(), hash.0.to_byte_array().to_vec()),
+    let (memo, description_hash) = match bolt11.as_ref().map(|b| b.description()) {
+        Some(Bolt11InvoiceDescription::Direct(desc)) => (desc.to_string(), vec![]),
+        Some(Bolt11InvoiceDescription::Hash(hash)) => {
+            (String::new(), hash.0.to_byte_array().to_vec())
+        }
+        None => (String::new(), vec![]),
     };
 
-    let fallback_addr = bolt11.fallback_addresses().first().map(|a| a.to_string());
+    let fallback_addr = bolt11
+        .as_ref()
+        .and_then(|b| b.fallback_addresses().first().map(|a| a.to_string()));
 
+    let value_msat = bolt11
+        .as_ref()
+        .and_then(|b| b.amount_milli_satoshis())
+        .unwrap_or_default() as i64;
     Invoice {
         memo,
         r_preimage: invoice.preimage().map(|p| p.to_vec()).unwrap_or_default(),
-        r_hash: bolt11.payment_hash().to_byte_array().to_vec(),
-        value: bolt11
-            .amount_milli_satoshis()
-            .map(|a| a / 1_000)
-            .unwrap_or(0) as i64,
-        value_msat: bolt11.amount_milli_satoshis().unwrap_or(0) as i64,
+        r_hash: invoice.payment_hash().to_vec(),
+        value: value_msat / 1_000,
+        value_msat,
         settled: state == InvoiceState::Settled,
         creation_date: invoice.creation_date(),
-        settle_date,
-        payment_request: bolt11.to_string(),
+        settle_date: invoice.settled_at().unwrap_or_default(),
+        payment_request: bolt11.as_ref().map(|b| b.to_string()).unwrap_or_default(),
         description_hash,
-        expiry: bolt11.expires_at().unwrap_or_default().as_secs() as i64,
+        expiry: bolt11
+            .as_ref()
+            .map(|b| b.expiry_time().as_secs())
+            .unwrap_or_default() as i64,
         fallback_addr: fallback_addr.unwrap_or_default(),
-        cltv_expiry: bolt11.min_final_cltv_expiry_delta(),
+        cltv_expiry: bolt11
+            .as_ref()
+            .map(|b| b.min_final_cltv_expiry_delta())
+            .unwrap_or_default(),
+        private: !route_hints.is_empty(),
         route_hints,
-        private: !bolt11.route_hints().is_empty(),
         add_index: invoice.id as u64,
         settle_index: invoice.id as u64,
         amt_paid: 0,
@@ -1835,8 +1865,11 @@ fn invoice_to_lnrpc_invoice(invoice: crate::models::invoice::Invoice) -> Invoice
         state: state.into(),
         htlcs: vec![],
         features: Default::default(),
-        is_keysend: false,
-        payment_addr: bolt11.payment_secret().0.to_vec(),
+        is_keysend: bolt11.is_none(),
+        payment_addr: bolt11
+            .as_ref()
+            .map(|b| b.payment_secret().0.to_vec())
+            .unwrap_or_default(),
         is_amp: false,
         amp_invoice_state: Default::default(),
     }

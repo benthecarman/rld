@@ -22,19 +22,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    invoices (id) {
-        id -> Int4,
-        payment_hash -> Bytea,
-        preimage -> Nullable<Bytea>,
-        bolt11 -> Text,
-        amount_msats -> Nullable<Int4>,
-        status -> Int2,
-        created_at -> Timestamp,
-        updated_at -> Timestamp,
-    }
-}
-
-diesel::table! {
     payments (id) {
         id -> Int4,
         payment_hash -> Bytea,
@@ -52,11 +39,37 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    received_htlcs (id) {
+        id -> Int4,
+        receive_id -> Int4,
+        amount_msats -> Int8,
+        channel_id -> Int4,
+        cltv_expiry -> Int8,
+    }
+}
+
+diesel::table! {
+    receives (id) {
+        id -> Int4,
+        payment_hash -> Bytea,
+        preimage -> Nullable<Bytea>,
+        bolt11 -> Nullable<Text>,
+        amount_msats -> Nullable<Int4>,
+        status -> Int2,
+        created_at -> Timestamp,
+        settled_at -> Nullable<Timestamp>,
+        updated_at -> Timestamp,
+    }
+}
+
 diesel::joinable!(channel_closures -> channel_open_params (id));
+diesel::joinable!(received_htlcs -> receives (receive_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     channel_closures,
     channel_open_params,
-    invoices,
     payments,
+    received_htlcs,
+    receives,
 );

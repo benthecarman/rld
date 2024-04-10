@@ -3,16 +3,17 @@ use crate::keys::KeysManager;
 use crate::logger::RldLogger;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
-use crate::models::invoice::Invoice;
 use crate::models::payment::Payment;
+use crate::models::receive::Receive;
+use crate::models::received_htlc::ReceivedHtlc;
 use crate::node::{BumpTxEventHandler, ChannelManager, Node, PeerManager};
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
 use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::Secp256k1;
 use diesel::r2d2::{ConnectionManager, Pool};
-use diesel::PgConnection;
-use lightning::events::{ClosureReason, Event};
+use diesel::{Connection, PgConnection};
+use lightning::events::{ClosureReason, Event, PaymentPurpose};
 use lightning::ln::PaymentPreimage;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
@@ -32,7 +33,7 @@ pub struct EventHandler {
     pub logger: Arc<RldLogger>,
 
     // broadcast channels
-    pub invoice_broadcast: tokio::sync::broadcast::Sender<Invoice>,
+    pub invoice_broadcast: tokio::sync::broadcast::Sender<Receive>,
 }
 
 impl EventHandler {
@@ -131,7 +132,7 @@ impl EventHandler {
                 } else {
                     // if channel_manager doesn't have the preimage, try to find it in the database
                     let mut conn = self.db_pool.get()?;
-                    match Invoice::find_by_payment_hash(&mut conn, &payment_hash.0)?
+                    match Receive::find_by_payment_hash(&mut conn, &payment_hash.0)?
                         .and_then(|x| x.preimage())
                     {
                         None => log_error!(self.logger, "ERROR: No payment preimage found"),
@@ -148,7 +149,7 @@ impl EventHandler {
                 payment_hash,
                 amount_msat,
                 purpose,
-                htlcs: _,
+                htlcs,
                 sender_intended_total_msat: _,
             } => {
                 log_debug!(
@@ -157,12 +158,39 @@ impl EventHandler {
                 );
 
                 let mut conn = self.db_pool.get()?;
-                let inv = Invoice::mark_as_paid(
-                    &mut conn,
-                    payment_hash.0,
-                    purpose.preimage().map(|p| p.0),
-                    amount_msat as i32,
-                )?;
+
+                let inv = conn.transaction::<_, anyhow::Error, _>(|conn| {
+                    let inv = match purpose {
+                        PaymentPurpose::InvoicePayment {
+                            payment_preimage, ..
+                        } => Receive::mark_as_paid(
+                            conn,
+                            payment_hash.0,
+                            payment_preimage.map(|p| p.0),
+                            amount_msat as i32,
+                        )?,
+                        PaymentPurpose::SpontaneousPayment(payment_preimage) => {
+                            Receive::create_keysend(
+                                conn,
+                                payment_hash.0,
+                                payment_preimage.0,
+                                amount_msat as i32,
+                            )?
+                        }
+                    };
+
+                    for htlc in htlcs {
+                        ReceivedHtlc::create(
+                            conn,
+                            inv.id,
+                            htlc.value_msat as i64,
+                            htlc.user_channel_id as i32,
+                            htlc.cltv_expiry as i64,
+                        )?;
+                    }
+
+                    Ok(inv)
+                })?;
 
                 self.invoice_broadcast.send(inv)?;
 

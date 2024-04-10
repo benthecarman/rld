@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 pub mod channel_closure;
 pub mod channel_open_param;
-pub mod invoice;
 pub mod payment;
+pub mod receive;
+pub mod received_htlc;
 mod schema;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
