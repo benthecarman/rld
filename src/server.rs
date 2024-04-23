@@ -8,6 +8,7 @@ use crate::models::routed_payment::RoutedPayment;
 use crate::models::CreatedInvoice;
 use crate::node::Node;
 use crate::proto::channel_point::FundingTxid;
+use crate::proto::fee_limit::Limit;
 use crate::proto::invoice::InvoiceState;
 use crate::proto::lightning_server::Lightning;
 use crate::proto::pending_channels_response::{PendingChannel, PendingOpenChannel};
@@ -23,6 +24,7 @@ use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
 use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{NodeSigner, Recipient};
 use lightning::util::ser::Writeable;
 use lightning_invoice::payment::{
@@ -1622,7 +1624,79 @@ impl Lightning for Node {
         &self,
         request: Request<QueryRoutesRequest>,
     ) -> Result<Response<QueryRoutesResponse>, Status> {
-        Err(Status::unimplemented("query_routes")) // todo
+        let req = request.into_inner();
+        let pk = PublicKey::from_str(&req.pub_key)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let inflight = self.channel_manager.compute_inflight_htlcs();
+
+        if !req.source_pub_key.is_empty() {
+            return Err(Status::unimplemented("source_pub_key is not supported"));
+        }
+
+        let final_value_msat = if req.amt_msat > 0 {
+            req.amt_msat as u64
+        } else if req.amt > 0 {
+            req.amt as u64 * 1_000
+        } else {
+            return Err(Status::invalid_argument("amt or amt_msat is required"));
+        };
+
+        let max_total_routing_fee_msat = req.fee_limit.and_then(|l| l.limit).map(|l| match l {
+            Limit::Fixed(sats) => (sats * 1_000) as u64,
+            Limit::FixedMsat(msats) => msats as u64,
+            Limit::Percent(percent) => (percent as u64 * final_value_msat / 100),
+        });
+
+        let mut payment_params = PaymentParameters::from_node_id(pk, req.final_cltv_delta as u32);
+        let route_params = RouteParameters {
+            payment_params,
+            final_value_msat,
+            max_total_routing_fee_msat,
+        };
+
+        match self.router.find_route(&pk, &route_params, None, inflight) {
+            Ok(route) => {
+                let routes = route.paths.into_iter().map(|p| {
+                    let hops: Vec<Hop> = p.hops
+                        .iter()
+                        .map(|hop| Hop {
+                            chan_id: hop.short_channel_id,
+                            chan_capacity: 0,
+                            amt_to_forward: 0,
+                            fee: (hop.fee_msat / 1_000) as i64,
+                            expiry: hop.cltv_expiry_delta,
+                            amt_to_forward_msat: 0,
+                            fee_msat: hop.fee_msat as i64,
+                            pub_key: hop.pubkey.to_string(),
+                            tlv_payload: false,
+                            mpp_record: None,
+                            amp_record: None,
+                            custom_records: Default::default(),
+                            metadata: vec![],
+                        })
+                        .collect();
+
+                    Route {
+                        total_time_lock: p.final_cltv_expiry_delta().unwrap_or_default(),
+                        total_fees: (p.fee_msat() / 1_000) as i64,
+                        total_amt: (p.final_value_msat() / 1_000) as i64,
+                        hops,
+                        total_fees_msat: p.fee_msat() as i64,
+                        total_amt_msat: p.final_value_msat() as i64,
+                    }
+                }).collect();
+
+                let resp = QueryRoutesResponse {
+                    routes,
+                    success_prob: 50.0, // todo
+                };
+
+                Ok(Response::new(resp))
+            }
+            Err(e) => {
+                return Err(Status::internal(format!("{e:?}")));
+            }
+        }
     }
 
     async fn get_network_info(
