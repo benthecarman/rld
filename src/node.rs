@@ -585,7 +585,59 @@ impl Node {
             }
         });
 
-        // todo reconnect to peers
+        // Reconnect to peers every 120 seconds
+        // todo doesn't work for peers that are not in the graph
+        let reconnect_graph = network_graph.clone();
+        let reconnect_peer_manager = peer_manager.clone();
+        let reconnect_channel_manager = channel_manager.clone();
+        let reconnect_logger = logger.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                let channels = reconnect_channel_manager.list_channels();
+                let missing_peers = channels
+                    .iter()
+                    .filter(|c| !c.is_usable)
+                    .map(|c| c.counterparty.node_id)
+                    .collect::<HashSet<_>>();
+
+                let current_peers = reconnect_peer_manager.list_peers();
+
+                for peer in missing_peers {
+                    if current_peers.iter().any(|p| p.counterparty_node_id == peer) {
+                        continue;
+                    }
+                    log_info!(reconnect_logger, "Reconnecting to peer: {peer}");
+
+                    let addresses = {
+                        reconnect_graph
+                            .read_only()
+                            .node(&peer.into())
+                            .and_then(|n| n.announcement_info.clone())
+                            .and_then(|a| a.announcement_message)
+                            .map(|a| a.contents.addresses)
+                            .map(|a| {
+                                a.iter()
+                                    .flat_map(|a| a.to_socket_addrs().unwrap_or_default())
+                                    .collect::<Vec<_>>()
+                            })
+                    };
+
+                    for addr in addresses.unwrap_or_default() {
+                        log_info!(reconnect_logger, "Connecting to peer: {peer} at: {addr}");
+                        match Self::do_connect_peer(reconnect_peer_manager.clone(), peer, addr)
+                            .await
+                        {
+                            Ok(_) => break,
+                            Err(e) => {
+                                log_error!(reconnect_logger, "Error connecting to peer: {e}")
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
         let node = Node {
             config,
