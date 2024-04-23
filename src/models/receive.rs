@@ -105,7 +105,12 @@ impl Receive {
             .get_result(conn)?)
     }
 
-    pub fn create_keysend(conn: &mut PgConnection, payment_hash: [u8; 32], preimage: [u8; 32], amount_msats: i64) -> anyhow::Result<Receive> {
+    pub fn create_keysend(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+        preimage: [u8; 32],
+        amount_msats: i64,
+    ) -> anyhow::Result<Receive> {
         let keysend = NewReceive {
             payment_hash: payment_hash.to_vec(),
             preimage: Some(preimage.to_vec()),

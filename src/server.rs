@@ -577,13 +577,16 @@ impl Lightning for Node {
         &self,
         _: Request<ListPeersRequest>,
     ) -> Result<Response<ListPeersResponse>, Status> {
-        let peers = self.peer_manager.get_peer_node_ids();
+        let peers = self.peer_manager.list_peers();
 
         let peers = peers
             .into_iter()
-            .map(|(p, addr)| Peer {
-                pub_key: p.to_string(),
-                address: addr.map(|a| a.to_string()).unwrap_or_default(),
+            .map(|peer| Peer {
+                pub_key: peer.counterparty_node_id.to_string(),
+                address: peer
+                    .socket_address
+                    .map(|a| a.to_string())
+                    .unwrap_or_default(),
                 bytes_sent: 0,
                 bytes_recv: 0,
                 sat_sent: 0,
@@ -617,7 +620,7 @@ impl Lightning for Node {
         &self,
         _: Request<GetInfoRequest>,
     ) -> Result<Response<GetInfoResponse>, Status> {
-        let num_peers = self.peer_manager.get_peer_node_ids().len() as u32;
+        let num_peers = self.peer_manager.list_peers().len() as u32;
         let channels = self.channel_manager.list_channels();
         let best_block = self.channel_manager.current_best_block();
 
@@ -640,8 +643,8 @@ impl Lightning for Node {
             num_active_channels: channels.iter().filter(|c| c.is_usable).count() as u32,
             num_inactive_channels: channels.iter().filter(|c| !c.is_usable).count() as u32,
             num_peers,
-            block_height: best_block.height(),
-            block_hash: best_block.block_hash().to_string(),
+            block_height: best_block.height,
+            block_hash: best_block.block_hash.to_string(),
             best_header_timestamp: 0,
             synced_to_chain: true, // idk if correct
             synced_to_graph: true, // idk if correct
@@ -1500,7 +1503,7 @@ impl Lightning for Node {
             .collect();
 
         let resp = PayReq {
-            destination: invoice.recover_payee_pub_key().to_string(),
+            destination: invoice.get_payee_pub_key().to_string(),
             payment_hash: invoice.payment_hash().to_string(),
             num_satoshis: invoice
                 .amount_milli_satoshis()

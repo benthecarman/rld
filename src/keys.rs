@@ -14,7 +14,7 @@ use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::offers::invoice_request::UnsignedInvoiceRequest;
 use lightning::sign::{
     EntropySource, InMemorySigner, KeyMaterial, KeysManager as LdkKeysManager, NodeSigner,
-    Recipient, SignerProvider, SpendableOutputDescriptor,
+    OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 use std::str::FromStr;
 use std::sync::Arc;

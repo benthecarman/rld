@@ -7,8 +7,8 @@ use crate::logger::RldLogger;
 use crate::models;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::channel_open_param::ChannelOpenParam;
-use crate::models::receive::Receive;
 use crate::models::payment::{Payment, PaymentStatus};
+use crate::models::receive::Receive;
 use crate::models::CreatedInvoice;
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
@@ -21,6 +21,7 @@ use bitcoin::{BlockHash, Network, OutPoint};
 use bitcoincore_rpc::{Auth, RpcApi};
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
+use lightning::blinded_path::EmptyNodeIdLookUp;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
@@ -58,8 +59,9 @@ use lightning_invoice::utils::{
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
+use std::collections::HashSet;
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -92,7 +94,8 @@ type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
     Arc<KeysManager>,
     Arc<KeysManager>,
     Arc<RldLogger>,
-    Arc<DefaultMessageRouter<Arc<NetworkGraph>, Arc<RldLogger>>>,
+    Arc<EmptyNodeIdLookUp>,
+    Arc<DefaultMessageRouter<Arc<NetworkGraph>, Arc<RldLogger>, Arc<KeysManager>>>,
     Arc<ChannelManager>,
     IgnoringMessageHandler,
 >;
@@ -102,6 +105,7 @@ pub(crate) type Scorer = ProbabilisticScorer<Arc<NetworkGraph>, Arc<RldLogger>>;
 pub(crate) type Router = DefaultRouter<
     Arc<NetworkGraph>,
     Arc<RldLogger>,
+    Arc<KeysManager>,
     Arc<RwLock<Scorer>>,
     ProbabilisticScoringFeeParameters,
     Scorer,
@@ -282,7 +286,7 @@ impl Node {
         let router = Arc::new(DefaultRouter::new(
             network_graph.clone(),
             logger.clone(),
-            keys_manager.get_secure_random_bytes(),
+            keys_manager.clone(),
             scorer.clone(),
             scoring_fee_params,
         ));
@@ -316,7 +320,7 @@ impl Node {
                 restarting_node = false;
 
                 let polled_best_block = polled_chain_tip.to_best_block();
-                let polled_best_block_hash = polled_best_block.block_hash();
+                let polled_best_block_hash = polled_best_block.block_hash;
                 let chain_params = ChainParameters {
                     network,
                     best_block: polled_best_block,
@@ -399,7 +403,11 @@ impl Node {
             Arc::clone(&keys_manager),
             Arc::clone(&keys_manager),
             Arc::clone(&logger),
-            Arc::new(DefaultMessageRouter::new(Arc::clone(&network_graph))),
+            Arc::new(EmptyNodeIdLookUp {}),
+            Arc::new(DefaultMessageRouter::new(
+                network_graph.clone(),
+                keys_manager.clone(),
+            )),
             Arc::clone(&channel_manager),
             IgnoringMessageHandler {},
         ));
@@ -577,7 +585,6 @@ impl Node {
             }
         });
 
-        // todo pending sweeps
         // todo reconnect to peers
 
         let node = Node {
@@ -753,7 +760,7 @@ impl Node {
             .map_err(|e| Status::internal(format!("{e:?}")))?;
 
         let mut conn = self.db_pool.get()?;
-        let pk = invoice.recover_payee_pub_key();
+        let pk = invoice.get_payee_pub_key();
         Payment::create(
             &mut conn,
             hash,
@@ -850,8 +857,8 @@ impl Node {
         pubkey: PublicKey,
         peer_addr: SocketAddr,
     ) -> anyhow::Result<()> {
-        for (node_pubkey, _) in self.peer_manager.get_peer_node_ids() {
-            if node_pubkey == pubkey {
+        for peer in self.peer_manager.list_peers() {
+            if peer.counterparty_node_id == pubkey {
                 return Ok(());
             }
         }
@@ -876,9 +883,9 @@ impl Node {
                         _ = tokio::time::sleep(Duration::from_millis(10)) => {},
                     }
                     if peer_manager
-                        .get_peer_node_ids()
+                        .list_peers()
                         .iter()
-                        .any(|(id, _)| *id == pubkey)
+                        .any(|peer| peer.counterparty_node_id == pubkey)
                     {
                         return Ok(());
                     }

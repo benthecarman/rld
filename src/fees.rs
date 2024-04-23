@@ -70,6 +70,7 @@ impl RldFeeEstimator {
         hash_map.insert(ConfirmationTarget::AnchorChannelFee, background_estimate);
         hash_map.insert(ConfirmationTarget::NonAnchorChannelFee, normal_estimate);
         hash_map.insert(ConfirmationTarget::ChannelCloseMinimum, normal_estimate);
+        hash_map.insert(ConfirmationTarget::OutputSpendingFee, normal_estimate);
 
         Ok(hash_map)
     }

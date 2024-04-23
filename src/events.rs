@@ -162,7 +162,7 @@ impl EventHandler {
 
                 let inv = conn.transaction::<_, anyhow::Error, _>(|conn| {
                     let inv = match purpose {
-                        PaymentPurpose::InvoicePayment {
+                        PaymentPurpose::Bolt11InvoicePayment {
                             payment_preimage, ..
                         } => Receive::mark_as_paid(
                             conn,
@@ -178,6 +178,22 @@ impl EventHandler {
                                 amount_msat as i64,
                             )?
                         }
+                        PaymentPurpose::Bolt12OfferPayment {
+                            payment_preimage, ..
+                        } => Receive::mark_as_paid(
+                            conn,
+                            payment_hash.0,
+                            payment_preimage.map(|p| p.0),
+                            amount_msat as i64,
+                        )?,
+                        PaymentPurpose::Bolt12RefundPayment {
+                            payment_preimage, ..
+                        } => Receive::mark_as_paid(
+                            conn,
+                            payment_hash.0,
+                            payment_preimage.map(|p| p.0),
+                            amount_msat as i64,
+                        )?,
                     };
 
                     for htlc in htlcs {
@@ -311,7 +327,7 @@ impl EventHandler {
                 // e.g. high-latency mix networks and some CoinJoin implementations, have
                 // better privacy.
                 // Logic copied from core: https://github.com/bitcoin/bitcoin/blob/1d4846a8443be901b8a5deb0e357481af22838d0/src/wallet/spend.cpp#L936
-                let mut height = self.channel_manager.current_best_block().height();
+                let mut height = self.channel_manager.current_best_block().height;
 
                 let rand = self.keys_manager.get_secure_random_bytes();
                 // 10% of the time
@@ -340,12 +356,15 @@ impl EventHandler {
             Event::PaymentForwarded {
                 prev_channel_id,
                 next_channel_id,
-                fee_earned_msat,
+                prev_user_channel_id: _,
+                next_user_channel_id: _,
+                total_fee_earned_msat,
+                skimmed_fee_msat: _,
                 claim_from_onchain_tx,
                 outbound_amount_forwarded_msat,
             } => {
                 if claim_from_onchain_tx
-                    || fee_earned_msat.is_none()
+                    || total_fee_earned_msat.is_none()
                     || outbound_amount_forwarded_msat.is_none()
                 {
                     return Ok(());
@@ -366,7 +385,7 @@ impl EventHandler {
                     .and_then(|c| c.short_channel_id)
                     .ok_or(anyhow!("Could not find next channel"))?;
 
-                log_debug!(self.logger, "EVENT: PaymentForwarded, prev_channel_id: {prev_channel_id:?}, next_channel_id: {next_channel_id:?}, fee_earned_msat: {fee_earned_msat:?}, outbound_amount_forwarded_msat: {outbound_amount_forwarded_msat:?}");
+                log_debug!(self.logger, "EVENT: PaymentForwarded, prev_channel_id: {prev_channel_id:?}, next_channel_id: {next_channel_id:?}, total_fee_earned_msat: {total_fee_earned_msat:?}, outbound_amount_forwarded_msat: {outbound_amount_forwarded_msat:?}");
 
                 let mut conn = self.db_pool.get()?;
                 RoutedPayment::create(
@@ -375,7 +394,7 @@ impl EventHandler {
                     prev_scid as i64,
                     next_channel_id.0.to_vec(),
                     next_scid as i64,
-                    fee_earned_msat.unwrap() as i64,
+                    total_fee_earned_msat.unwrap() as i64,
                     outbound_amount_forwarded_msat.unwrap() as i64,
                 )?;
 
@@ -387,13 +406,11 @@ impl EventHandler {
                 former_temporary_channel_id: _,
                 counterparty_node_id,
                 funding_txo: _,
+                channel_type,
             } => {
                 log_debug!(
                     self.logger,
-                    "EVENT: ChannelPending channel_id: {}, user_channel_id: {}, counterparty_node_id: {}",
-                    channel_id,
-                    user_channel_id,
-                    counterparty_node_id);
+                    "EVENT: ChannelPending channel_id: {channel_id}, user_channel_id: {user_channel_id}, counterparty_node_id: {counterparty_node_id}, channel_type: {channel_type:?}");
 
                 let mut conn = self.db_pool.get()?;
                 ChannelOpenParam::mark_success(&mut conn, user_channel_id as i32)?;
