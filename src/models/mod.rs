@@ -16,6 +16,7 @@ pub mod channel_open_param;
 pub mod payment;
 pub mod receive;
 pub mod received_htlc;
+pub mod routed_payment;
 mod schema;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();

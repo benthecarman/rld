@@ -3,6 +3,8 @@
 
 use crate::models::payment::PaymentStatus;
 use crate::models::receive::{InvoiceStatus, Receive};
+use crate::models::received_htlc::ReceivedHtlc;
+use crate::models::routed_payment::RoutedPayment;
 use crate::models::CreatedInvoice;
 use crate::node::Node;
 use crate::proto::channel_point::FundingTxid;
@@ -36,7 +38,6 @@ use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
 use tonic::codegen::tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
-use crate::models::received_htlc::ReceivedHtlc;
 
 #[tonic::async_trait]
 impl Lightning for Node {
@@ -1389,8 +1390,7 @@ impl Lightning for Node {
             .get()
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let invoices = Receive::find_all(&mut conn)
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let invoices = Receive::find_all(&mut conn).map_err(|e| Status::internal(e.to_string()))?;
 
         // todo htlcs
         let invoices = invoices.into_iter().map(receive_to_lnrpc_invoice).collect();
@@ -1655,7 +1655,38 @@ impl Lightning for Node {
         &self,
         request: Request<FeeReportRequest>,
     ) -> Result<Response<FeeReportResponse>, Status> {
-        Err(Status::unimplemented("fee_report")) // todo
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let report = RoutedPayment::get_fee_report(&mut conn)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let channels = self.channel_manager.list_channels();
+        let channel_fees = channels
+            .into_iter()
+            .map(|c| {
+                let config = c.config.expect("safe after ldk 0.0.109");
+                ChannelFeeReport {
+                    chan_id: c.short_channel_id.unwrap(),
+                    channel_point: c.funding_txo.map(|x| x.to_string()).unwrap_or_default(),
+                    base_fee_msat: config.forwarding_fee_base_msat as i64,
+                    fee_per_mil: config.forwarding_fee_proportional_millionths as i64,
+                    fee_rate: (config.forwarding_fee_proportional_millionths as f64
+                        / 1_000_000_f64),
+                }
+            })
+            .collect();
+
+        let response = FeeReportResponse {
+            channel_fees,
+            day_fee_sum: report.daily_fee_earned_msat as u64,
+            week_fee_sum: report.weekly_fee_earned_msat as u64,
+            month_fee_sum: report.monthly_fee_earned_msat as u64,
+        };
+
+        Ok(Response::new(response))
     }
 
     async fn update_channel_policy(
@@ -1669,7 +1700,54 @@ impl Lightning for Node {
         &self,
         request: Request<ForwardingHistoryRequest>,
     ) -> Result<Response<ForwardingHistoryResponse>, Status> {
-        Err(Status::unimplemented("forwarding_history")) // todo
+        let req = request.into_inner();
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let start = if req.start_time > 0 {
+            Some(req.start_time as i64)
+        } else {
+            None
+        };
+        let end = if req.end_time > 0 {
+            Some(req.end_time as i64)
+        } else {
+            None
+        };
+
+        let routed_payments = RoutedPayment::get_routed_payments(&mut conn, start, end)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let events: Vec<ForwardingEvent> = routed_payments
+            .into_iter()
+            .map(|p| {
+                let amt_in_msat = (p.amount_forwarded + p.fee_earned_msat) as u64;
+                let amt_out_msat = p.amount_forwarded as u64;
+                ForwardingEvent {
+                    fee_msat: p.fee_earned_msat as u64,
+                    amt_in_msat,
+                    amt_out_msat,
+                    timestamp_ns: p.created_at.timestamp_nanos() as u64,
+                    peer_alias_in: "".to_string(),
+                    timestamp: p.created_at.timestamp() as u64,
+                    chan_id_in: 0,
+                    chan_id_out: 0,
+                    amt_in: amt_in_msat / 1_000,
+                    amt_out: amt_out_msat / 1_000,
+                    fee: (p.fee_earned_msat / 1_000) as u64,
+                    peer_alias_out: "".to_string(),
+                }
+            })
+            .collect();
+
+        let response = ForwardingHistoryResponse {
+            forwarding_events: events,
+            last_offset_index: 0,
+        };
+
+        Ok(Response::new(response))
     }
 
     async fn export_channel_backup(

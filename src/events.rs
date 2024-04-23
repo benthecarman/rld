@@ -6,6 +6,7 @@ use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::payment::Payment;
 use crate::models::receive::Receive;
 use crate::models::received_htlc::ReceivedHtlc;
+use crate::models::routed_payment::RoutedPayment;
 use crate::node::{BumpTxEventHandler, ChannelManager, Node, PeerManager};
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
@@ -336,7 +337,50 @@ impl EventHandler {
 
                 Ok(())
             }
-            Event::PaymentForwarded { .. } => Ok(()),
+            Event::PaymentForwarded {
+                prev_channel_id,
+                next_channel_id,
+                fee_earned_msat,
+                claim_from_onchain_tx,
+                outbound_amount_forwarded_msat,
+            } => {
+                if claim_from_onchain_tx
+                    || fee_earned_msat.is_none()
+                    || outbound_amount_forwarded_msat.is_none()
+                {
+                    return Ok(());
+                }
+
+                let prev_channel_id = prev_channel_id.expect("safe after ldk 0.0.107");
+                let next_channel_id = next_channel_id.expect("safe after ldk 0.0.107");
+
+                let channels = self.channel_manager.list_channels();
+                let prev_scid = channels
+                    .iter()
+                    .find(|c| c.channel_id == prev_channel_id)
+                    .and_then(|c| c.short_channel_id)
+                    .ok_or(anyhow!("Could not find prev channel"))?;
+                let next_scid = channels
+                    .iter()
+                    .find(|c| c.channel_id == next_channel_id)
+                    .and_then(|c| c.short_channel_id)
+                    .ok_or(anyhow!("Could not find next channel"))?;
+
+                log_debug!(self.logger, "EVENT: PaymentForwarded, prev_channel_id: {prev_channel_id:?}, next_channel_id: {next_channel_id:?}, fee_earned_msat: {fee_earned_msat:?}, outbound_amount_forwarded_msat: {outbound_amount_forwarded_msat:?}");
+
+                let mut conn = self.db_pool.get()?;
+                RoutedPayment::create(
+                    &mut conn,
+                    prev_channel_id.0.to_vec(),
+                    prev_scid as i64,
+                    next_channel_id.0.to_vec(),
+                    next_scid as i64,
+                    fee_earned_msat.unwrap() as i64,
+                    outbound_amount_forwarded_msat.unwrap() as i64,
+                )?;
+
+                Ok(())
+            }
             Event::ChannelPending {
                 channel_id,
                 user_channel_id,

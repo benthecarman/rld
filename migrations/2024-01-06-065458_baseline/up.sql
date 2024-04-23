@@ -61,3 +61,15 @@ CREATE TABLE channel_closures
     reason      TEXT      NOT NULL,
     created_at  timestamp NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE routed_payments
+(
+    id               SERIAL PRIMARY KEY,
+    prev_channel_id  bytea     NOT NULL,
+    prev_scid        BIGINT    NOT NULL,
+    next_channel_id  bytea     NOT NULL,
+    next_scid        BIGINT    NOT NULL,
+    fee_earned_msat  BIGINT    NOT NULL,
+    amount_forwarded BIGINT    NOT NULL,
+    created_at       timestamp NOT NULL DEFAULT NOW()
+);

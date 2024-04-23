@@ -63,6 +63,19 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    routed_payments (id) {
+        id -> Int4,
+        prev_channel_id -> Bytea,
+        prev_scid -> Int8,
+        next_channel_id -> Bytea,
+        next_scid -> Int8,
+        fee_earned_msat -> Int8,
+        amount_forwarded -> Int8,
+        created_at -> Timestamp,
+    }
+}
+
 diesel::joinable!(channel_closures -> channel_open_params (id));
 diesel::joinable!(received_htlcs -> receives (receive_id));
 
@@ -72,4 +85,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     payments,
     received_htlcs,
     receives,
+    routed_payments,
 );
