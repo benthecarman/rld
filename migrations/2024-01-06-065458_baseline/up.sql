@@ -4,7 +4,7 @@ CREATE TABLE receives
     payment_hash bytea UNIQUE NOT NULL,
     preimage     bytea UNIQUE,
     bolt11       TEXT UNIQUE,
-    amount_msats INTEGER,
+    amount_msats BIGINT,
     status       SMALLINT     NOT NULL,
     created_at   timestamp    NOT NULL DEFAULT NOW(),
     settled_at   timestamp,
@@ -19,9 +19,9 @@ CREATE TABLE received_htlcs
 (
     id           SERIAL PRIMARY KEY,
     receive_id   INTEGER NOT NULL REFERENCES receives (id),
-    amount_msats BIGINT NOT NULL,
+    amount_msats BIGINT  NOT NULL,
     channel_id   INTEGER NOT NULL, -- REFERENCES channels (id),
-    cltv_expiry  BIGINT NOT NULL
+    cltv_expiry  BIGINT  NOT NULL
 );
 
 create unique index received_htlcs_receive_id_index on received_htlcs (receive_id);
@@ -31,8 +31,8 @@ CREATE TABLE payments
     id                 SERIAL PRIMARY KEY,
     payment_hash       bytea     NOT NULL,
     preimage           bytea UNIQUE,
-    amount_msats       INTEGER   NOT NULL,
-    fee_msats          INTEGER,
+    amount_msats       BIGINT    NOT NULL,
+    fee_msats          BIGINT,
     destination_pubkey bytea, -- keysend
     bolt11             TEXT UNIQUE,
     bolt12             TEXT,

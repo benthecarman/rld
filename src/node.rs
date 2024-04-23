@@ -757,7 +757,7 @@ impl Node {
         Payment::create(
             &mut conn,
             hash,
-            amount_msats as i32,
+            amount_msats as i64,
             Some(pk),
             Some(invoice),
             None,
@@ -820,7 +820,7 @@ impl Node {
         Payment::create(
             &mut conn,
             payment_hash,
-            amount_msats as i32,
+            amount_msats as i64,
             Some(node_id),
             None,
             None,

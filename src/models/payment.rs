@@ -34,8 +34,8 @@ pub struct Payment {
     pub id: i32,
     pub(crate) payment_hash: Vec<u8>,
     preimage: Option<Vec<u8>>,
-    pub amount_msats: i32,
-    pub fee_msats: Option<i32>,
+    pub amount_msats: i64,
+    pub fee_msats: Option<i64>,
     destination_pubkey: Option<Vec<u8>>,
     bolt11: Option<String>,
     bolt12: Option<String>,
@@ -50,7 +50,7 @@ pub struct Payment {
 #[diesel(table_name = payments)]
 struct NewPayment {
     payment_hash: Vec<u8>,
-    amount_msats: i32,
+    amount_msats: i64,
     destination_pubkey: Option<Vec<u8>>,
     bolt11: Option<String>,
     bolt12: Option<String>,
@@ -62,7 +62,7 @@ struct NewPayment {
 struct CompletedPayment {
     payment_hash: Vec<u8>,
     preimage: Vec<u8>,
-    fee_msats: i32,
+    fee_msats: i64,
     status: i16,
 }
 
@@ -80,11 +80,11 @@ impl Payment {
             .map(|p| p.as_slice().try_into().expect("invalid preimage"))
     }
 
-    pub fn amount_msats(&self) -> i32 {
+    pub fn amount_msats(&self) -> i64 {
         self.amount_msats
     }
 
-    pub fn fee_msats(&self) -> Option<i32> {
+    pub fn fee_msats(&self) -> Option<i64> {
         self.fee_msats
     }
 
@@ -147,7 +147,7 @@ impl Payment {
     pub fn create(
         conn: &mut PgConnection,
         payment_hash: PaymentHash,
-        amount_msats: i32,
+        amount_msats: i64,
         destination_pubkey: Option<PublicKey>,
         bolt11: Option<Bolt11Invoice>,
         bolt12: Option<Offer>,
@@ -170,7 +170,7 @@ impl Payment {
         conn: &mut PgConnection,
         payment_hash: PaymentHash,
         preimage: [u8; 32],
-        fee_msats: i32,
+        fee_msats: i64,
     ) -> anyhow::Result<Payment> {
         let completed = CompletedPayment {
             payment_hash: payment_hash.0.to_vec(),

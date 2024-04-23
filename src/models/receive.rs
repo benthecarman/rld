@@ -32,7 +32,7 @@ pub struct Receive {
     payment_hash: Vec<u8>,
     preimage: Option<Vec<u8>>,
     bolt11: Option<String>,
-    pub amount_msats: Option<i32>,
+    pub amount_msats: Option<i64>,
     pub status: i16,
     pub created_at: chrono::NaiveDateTime,
     pub settled_at: Option<chrono::NaiveDateTime>,
@@ -44,7 +44,7 @@ pub struct Receive {
 pub struct NewReceive {
     pub payment_hash: Vec<u8>,
     pub preimage: Option<Vec<u8>>,
-    pub amount_msats: Option<i32>,
+    pub amount_msats: Option<i64>,
     pub bolt11: Option<String>,
     pub status: i16,
 }
@@ -95,7 +95,7 @@ impl Receive {
         let new_invoice = NewReceive {
             payment_hash: invoice.payment_hash().as_byte_array().to_vec(),
             preimage: None,
-            amount_msats: invoice.amount_milli_satoshis().map(|a| a as i32),
+            amount_msats: invoice.amount_milli_satoshis().map(|a| a as i64),
             bolt11: Some(invoice.to_string()),
             status: InvoiceStatus::Pending as i16,
         };
@@ -105,7 +105,7 @@ impl Receive {
             .get_result(conn)?)
     }
 
-    pub fn create_keysend(conn: &mut PgConnection, payment_hash: [u8; 32], preimage: [u8; 32], amount_msats: i32) -> anyhow::Result<Receive> {
+    pub fn create_keysend(conn: &mut PgConnection, payment_hash: [u8; 32], preimage: [u8; 32], amount_msats: i64) -> anyhow::Result<Receive> {
         let keysend = NewReceive {
             payment_hash: payment_hash.to_vec(),
             preimage: Some(preimage.to_vec()),
@@ -133,7 +133,7 @@ impl Receive {
         conn: &mut PgConnection,
         payment_hash: [u8; 32],
         preimage: Option<[u8; 32]>,
-        amount_msats: i32,
+        amount_msats: i64,
     ) -> anyhow::Result<Self> {
         let res = match preimage {
             Some(preimage) => diesel::update(receives::table)

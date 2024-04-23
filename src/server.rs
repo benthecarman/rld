@@ -1186,11 +1186,11 @@ impl Lightning for Node {
 
                         let payment_route = Route {
                             total_time_lock,
-                            total_fees: payment.fee_msats.unwrap_or_default() as i64 / 1_000,
-                            total_amt: payment.amount_msats as i64 / 1_000,
+                            total_fees: payment.fee_msats.unwrap_or_default() / 1_000,
+                            total_amt: payment.amount_msats / 1_000,
                             hops,
-                            total_fees_msat: payment.amount_msats as i64,
-                            total_amt_msat: payment.amount_msats as i64,
+                            total_fees_msat: payment.amount_msats,
+                            total_amt_msat: payment.amount_msats,
                         };
 
                         SendResponse {
@@ -1290,11 +1290,11 @@ impl Lightning for Node {
 
                 let payment_route = Route {
                     total_time_lock,
-                    total_fees: payment.fee_msats.unwrap_or_default() as i64 / 1_000,
-                    total_amt: payment.amount_msats as i64 / 1_000,
+                    total_fees: payment.fee_msats.unwrap_or_default() / 1_000,
+                    total_amt: payment.amount_msats / 1_000,
                     hops,
-                    total_fees_msat: payment.amount_msats as i64,
-                    total_amt_msat: payment.amount_msats as i64,
+                    total_fees_msat: payment.amount_msats,
+                    total_amt_msat: payment.amount_msats,
                 };
 
                 SendResponse {
@@ -1552,11 +1552,11 @@ impl Lightning for Node {
                     value: 0,
                     creation_date: p.created_at.and_utc().timestamp(),
                     fee: 0,
-                    value_sat: (p.amount_msats / 1000) as i64,
-                    value_msat: p.amount_msats as i64,
+                    value_sat: (p.amount_msats / 1000),
+                    value_msat: p.amount_msats,
                     payment_index: p.id as u64,
-                    fee_sat: p.fee_msats.unwrap_or_default() as i64 / 1000,
-                    fee_msat: p.fee_msats.unwrap_or_default() as i64,
+                    fee_sat: p.fee_msats.unwrap_or_default() / 1000,
+                    fee_msat: p.fee_msats.unwrap_or_default(),
                     creation_time_ns: p.created_at.timestamp_nanos(),
                     status: status as i32,
                     htlcs: vec![],
@@ -1814,7 +1814,7 @@ fn receive_to_lnrpc_invoice(invoice: crate::models::receive::Receive) -> Invoice
         .collect::<Vec<_>>();
 
     let amt_paid_msat = if state == InvoiceState::Settled {
-        invoice.amount_msats.unwrap_or_default() as i64
+        invoice.amount_msats.unwrap_or_default()
     } else {
         0
     };

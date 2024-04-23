@@ -167,14 +167,14 @@ impl EventHandler {
                             conn,
                             payment_hash.0,
                             payment_preimage.map(|p| p.0),
-                            amount_msat as i32,
+                            amount_msat as i64,
                         )?,
                         PaymentPurpose::SpontaneousPayment(payment_preimage) => {
                             Receive::create_keysend(
                                 conn,
                                 payment_hash.0,
                                 payment_preimage.0,
-                                amount_msat as i32,
+                                amount_msat as i64,
                             )?
                         }
                     };
@@ -233,7 +233,7 @@ impl EventHandler {
                     &mut conn,
                     payment_hash,
                     payment_preimage.0,
-                    fee_paid_msat.unwrap_or_default() as i32,
+                    fee_paid_msat.unwrap_or_default() as i64,
                 )?;
 
                 Ok(())
