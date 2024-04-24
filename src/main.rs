@@ -102,11 +102,15 @@ async fn main() -> anyhow::Result<()> {
 
     let tls_config = ServerTlsConfig::new().identity(Identity::from_pem(&cert, &tls_key));
 
-    let keys = KeysFile::read(&path.join("keys.json"), config.network(), &logger)?;
+    let network = config.network();
+    let keys = KeysFile::read(&path.join("keys.json"), network, &logger)?;
     let seed = keys.seed.to_seed_normalized("");
     let xpriv = ExtendedPrivKey::new_master(config.network(), &seed)?;
 
-    let derv_path = DerivationPath::from_str("m/1234'/5678'")?;
+    let derv_path = match network {
+        Network::Bitcoin => DerivationPath::from_str("m/1039h/0h/0h/0/0")?,
+        _ => DerivationPath::from_str("m/1039h/1h/0h/0/0")?,
+    };
     let mac_root_key = xpriv.derive_priv(&Secp256k1::signing_only(), &derv_path)?;
     let mac_key = MacaroonKey::from(&mac_root_key.private_key.secret_bytes());
 
