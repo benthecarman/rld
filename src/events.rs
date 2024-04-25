@@ -1,8 +1,8 @@
 use crate::fees::RldFeeEstimator;
 use crate::keys::KeysManager;
 use crate::logger::RldLogger;
+use crate::models::channel::Channel;
 use crate::models::channel_closure::ChannelClosure;
-use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::payment::Payment;
 use crate::models::receive::Receive;
 use crate::models::received_htlc::ReceivedHtlc;
@@ -18,6 +18,7 @@ use lightning::events::{ClosureReason, Event, PaymentPurpose};
 use lightning::ln::PaymentPreimage;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
+use lightning::util::ser::Writeable;
 use lightning::{log_debug, log_error, log_info};
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
@@ -61,15 +62,14 @@ impl EventHandler {
                 let mut conn = self.db_pool.get()?;
 
                 // Get the open parameters for this channel
-                let mut params =
-                    match ChannelOpenParam::find_by_id(&mut conn, user_channel_id as i32)? {
-                        Some(params) => params,
-                        None => {
-                            anyhow::bail!(
+                let mut params = match Channel::find_by_id(&mut conn, user_channel_id as i32)? {
+                    Some(params) => params,
+                    None => {
+                        anyhow::bail!(
                             "Could not find channel open parameters for channel {user_channel_id}"
                         );
-                        }
-                    };
+                    }
+                };
 
                 let psbt = match self.wallet.create_signed_psbt_to_spk(
                     output_script,
@@ -405,7 +405,7 @@ impl EventHandler {
                 user_channel_id,
                 former_temporary_channel_id: _,
                 counterparty_node_id,
-                funding_txo: _,
+                funding_txo,
                 channel_type,
             } => {
                 log_debug!(
@@ -413,7 +413,15 @@ impl EventHandler {
                     "EVENT: ChannelPending channel_id: {channel_id}, user_channel_id: {user_channel_id}, counterparty_node_id: {counterparty_node_id}, channel_type: {channel_type:?}");
 
                 let mut conn = self.db_pool.get()?;
-                ChannelOpenParam::mark_success(&mut conn, user_channel_id as i32)?;
+                conn.transaction::<_, anyhow::Error, _>(|conn| {
+                    Channel::mark_success(
+                        conn,
+                        user_channel_id as i32,
+                        funding_txo.to_string(),
+                        channel_id.0.to_vec(),
+                    )?;
+                    Ok(())
+                })?;
 
                 Ok(())
             }
@@ -445,7 +453,7 @@ impl EventHandler {
                 // we should not persist this as a closed channel and just delete the channel open params
                 let mut conn = self.db_pool.get()?;
                 let id = user_channel_id as i32;
-                if let Ok(Some(_)) = ChannelOpenParam::find_by_id(&mut conn, id) {
+                if let Ok(Some(_)) = Channel::find_by_id(&mut conn, id) {
                     // should we delete from db?
                     return Ok(());
                 };
@@ -487,8 +495,8 @@ impl EventHandler {
             Event::OpenChannelRequest {
                 temporary_channel_id,
                 counterparty_node_id,
-                funding_satoshis: _,
-                push_msat: _,
+                funding_satoshis,
+                push_msat,
                 channel_type: _,
             } => {
                 log_debug!(
@@ -496,13 +504,25 @@ impl EventHandler {
                     "EVENT: OpenChannelRequest incoming: {counterparty_node_id}"
                 );
 
-                // todo calculate deterministically
-                let user_channel_id = 0;
+                // todo channel acceptor
+
+                // save params to db
+                let mut conn = self.db_pool.get()?;
+                let params = Channel::create(
+                    &mut conn,
+                    counterparty_node_id.encode(),
+                    None,
+                    push_msat as i64,
+                    false, // todo set private correctly
+                    false,
+                    funding_satoshis as i64,
+                    false, // todo set zero_conf correctly
+                )?;
 
                 let result = self.channel_manager.accept_inbound_channel(
                     &temporary_channel_id,
                     &counterparty_node_id,
-                    user_channel_id,
+                    params.id as u128,
                 );
 
                 match result {

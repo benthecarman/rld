@@ -5,8 +5,8 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::KeysManager;
 use crate::logger::RldLogger;
 use crate::models;
+use crate::models::channel::Channel;
 use crate::models::channel_closure::ChannelClosure;
-use crate::models::channel_open_param::ChannelOpenParam;
 use crate::models::payment::{Payment, PaymentStatus};
 use crate::models::receive::Receive;
 use crate::models::CreatedInvoice;
@@ -980,7 +980,7 @@ impl Node {
                 log_debug!(self.logger, "Waiting for Channel Pending event");
                 loop {
                     // make sure the channel is open
-                    if ChannelOpenParam::find_by_id(&mut conn, user_channel_id as i32)?
+                    if Channel::find_by_id(&mut conn, user_channel_id as i32)?
                         .is_some_and(|p| p.success)
                     {
                         return Ok(outpoint.into_bitcoin_outpoint());
@@ -1017,7 +1017,16 @@ impl Node {
     ) -> anyhow::Result<(ChannelId, u128)> {
         // save params to db
         let mut conn = self.db_pool.get()?;
-        let params = ChannelOpenParam::create(&mut conn, sats_per_vbyte)?;
+        let params = Channel::create(
+            &mut conn,
+            pubkey.encode(),
+            sats_per_vbyte,
+            push_msat as i64,
+            private,
+            true,
+            amount_sat as i64,
+            false,
+        )?;
 
         let user_channel_id: u128 = params.id.try_into()?;
         let mut config = default_user_config();

@@ -11,9 +11,17 @@ diesel::table! {
 }
 
 diesel::table! {
-    channel_open_params (id) {
+    channels (id) {
         id -> Int4,
+        node_id -> Bytea,
         sats_per_vbyte -> Nullable<Int4>,
+        push_amount_sat -> Int8,
+        private -> Bool,
+        initiator -> Bool,
+        capacity -> Int8,
+        zero_conf -> Bool,
+        funding_txo -> Nullable<Text>,
+        channel_id -> Nullable<Bytea>,
         opening_tx -> Nullable<Bytea>,
         success -> Bool,
         created_at -> Timestamp,
@@ -76,12 +84,13 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(channel_closures -> channel_open_params (id));
+diesel::joinable!(channel_closures -> channels (id));
+diesel::joinable!(received_htlcs -> channels (channel_id));
 diesel::joinable!(received_htlcs -> receives (receive_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     channel_closures,
-    channel_open_params,
+    channels,
     payments,
     received_htlcs,
     receives,

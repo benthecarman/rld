@@ -15,16 +15,21 @@ create unique index receives_payment_hash_index on receives (payment_hash);
 create unique index receives_bolt11_index on receives (bolt11);
 create index receives_status_index on receives (status);
 
-CREATE TABLE received_htlcs
-(
-    id           SERIAL PRIMARY KEY,
-    receive_id   INTEGER NOT NULL REFERENCES receives (id),
-    amount_msats BIGINT  NOT NULL,
-    channel_id   INTEGER NOT NULL, -- REFERENCES channels (id),
-    cltv_expiry  BIGINT  NOT NULL
-);
+-- create trigger to update updated_at on insert
+CREATE OR REPLACE FUNCTION update_updated_at()
+    RETURNS TRIGGER AS
+$$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
-create unique index received_htlcs_receive_id_index on received_htlcs (receive_id);
+CREATE TRIGGER update_updated_at_trigger
+    BEFORE INSERT
+    ON receives
+    FOR EACH ROW
+EXECUTE PROCEDURE update_updated_at();
 
 CREATE TABLE payments
 (
@@ -43,19 +48,41 @@ CREATE TABLE payments
     updated_at         timestamp NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE channel_open_params
+-- create trigger to update updated_at on insert
+CREATE TRIGGER update_updated_at_trigger
+    BEFORE INSERT
+    ON payments
+    FOR EACH ROW
+EXECUTE PROCEDURE update_updated_at();
+
+CREATE TABLE channels
 (
-    id             SERIAL PRIMARY KEY,
-    sats_per_vbyte INTEGER,
-    opening_tx     bytea,
-    success        BOOLEAN   NOT NULL DEFAULT FALSE,
-    created_at     timestamp NOT NULL DEFAULT NOW(),
-    updated_at     timestamp NOT NULL DEFAULT NOW()
+    id              SERIAL PRIMARY KEY,
+    node_id         bytea     NOT NULL,
+    sats_per_vbyte  INTEGER,
+    push_amount_sat BIGINT    NOT NULL,
+    private         BOOLEAN   NOT NULL,
+    initiator       BOOLEAN   NOT NULL,
+    capacity        BIGINT    NOT NULL,
+    zero_conf       BOOLEAN   NOT NULL,
+    funding_txo     TEXT,
+    channel_id      bytea,
+    opening_tx      bytea,
+    success         BOOLEAN   NOT NULL DEFAULT FALSE,
+    created_at      timestamp NOT NULL DEFAULT NOW(),
+    updated_at      timestamp NOT NULL DEFAULT NOW()
 );
+
+-- create trigger to update updated_at on insert
+CREATE TRIGGER update_updated_at_trigger
+    BEFORE INSERT
+    ON channels
+    FOR EACH ROW
+EXECUTE PROCEDURE update_updated_at();
 
 CREATE TABLE channel_closures
 (
-    id          SERIAL PRIMARY KEY references channel_open_params (id),
+    id          SERIAL PRIMARY KEY references channels (id),
     node_id     bytea     NOT NULL,
     funding_txo TEXT,
     reason      TEXT      NOT NULL,
@@ -73,3 +100,14 @@ CREATE TABLE routed_payments
     amount_forwarded BIGINT    NOT NULL,
     created_at       timestamp NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE received_htlcs
+(
+    id           SERIAL PRIMARY KEY,
+    receive_id   INTEGER NOT NULL REFERENCES receives (id),
+    amount_msats BIGINT  NOT NULL,
+    channel_id   INTEGER NOT NULL REFERENCES channels (id),
+    cltv_expiry  BIGINT  NOT NULL
+);
+
+create unique index received_htlcs_receive_id_index on received_htlcs (receive_id);
