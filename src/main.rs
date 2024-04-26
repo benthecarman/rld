@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::logger::RldLogger;
 use crate::models::MIGRATIONS;
 use crate::node::Node;
-use crate::proto::lightning_server::LightningServer;
+use crate::lnrpc::lightning_server::LightningServer;
 use bip39::Mnemonic;
 use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
@@ -35,7 +35,6 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Status};
 
 mod chain;
-mod cli;
 mod config;
 mod events;
 mod fees;
@@ -46,8 +45,9 @@ mod node;
 mod onchain;
 mod server;
 
-pub mod proto {
+pub mod lnrpc {
     tonic::include_proto!("lnrpc");
+    tonic::include_proto!("invoicesrpc");
 }
 
 #[tokio::main]

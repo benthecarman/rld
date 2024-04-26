@@ -4,7 +4,7 @@ use crate::logger::RldLogger;
 use crate::models::channel::Channel;
 use crate::models::channel_closure::ChannelClosure;
 use crate::models::payment::Payment;
-use crate::models::receive::Receive;
+use crate::models::receive::{InvoiceStatus, Receive};
 use crate::models::received_htlc::ReceivedHtlc;
 use crate::models::routed_payment::RoutedPayment;
 use crate::node::{BumpTxEventHandler, ChannelManager, Node, PeerManager};
@@ -128,11 +128,21 @@ impl EventHandler {
             } => {
                 log_debug!(self.logger, "EVENT: PaymentReceived received payment from payment hash {payment_hash} of {amount_msat} msats to {receiver_node_id:?}");
 
+                let mut conn = self.db_pool.get()?;
+                let receive = Receive::find_by_payment_hash(&mut conn, &payment_hash.0)?;
+
+                if receive.as_ref().is_some_and(|r| {
+                    matches!(r.status(), InvoiceStatus::Expired | InvoiceStatus::Canceled)
+                }) {
+                    log_info!(self.logger, "EVENT: PaymentReceived received canceled payment from payment hash {payment_hash} of {amount_msat} msats to {receiver_node_id:?}");
+                    self.channel_manager.fail_htlc_backwards(&payment_hash);
+                    return Ok(());
+                }
+
                 if let Some(payment_preimage) = purpose.preimage() {
                     self.channel_manager.claim_funds(payment_preimage);
                 } else {
                     // if channel_manager doesn't have the preimage, try to find it in the database
-                    let mut conn = self.db_pool.get()?;
                     match Receive::find_by_payment_hash(&mut conn, &payment_hash.0)?
                         .and_then(|x| x.preimage())
                     {

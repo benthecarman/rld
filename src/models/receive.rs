@@ -11,6 +11,7 @@ pub enum InvoiceStatus {
     Paid = 1,
     Expired = 2,
     Held = 3,
+    Canceled = 4,
 }
 
 #[derive(
@@ -75,6 +76,7 @@ impl Receive {
             1 => InvoiceStatus::Paid,
             2 => InvoiceStatus::Expired,
             3 => InvoiceStatus::Held,
+            4 => InvoiceStatus::Canceled,
             _ => panic!("Invalid invoice status"),
         }
     }
@@ -172,6 +174,24 @@ impl Receive {
             .set(receives::status.eq(InvoiceStatus::Expired as i16))
             .get_result(conn)?;
 
+        Ok(res)
+    }
+
+    pub fn mark_as_canceled(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+    ) -> anyhow::Result<Option<Self>> {
+        let res = diesel::update(receives::table)
+            .filter(receives::payment_hash.eq(payment_hash.as_slice()))
+            // only update if the invoice is pending or held
+            .filter(
+                receives::status
+                    .eq(InvoiceStatus::Pending as i16)
+                    .or(receives::status.eq(InvoiceStatus::Held as i16)),
+            )
+            .set(receives::status.eq(InvoiceStatus::Canceled as i16))
+            .get_result(conn)
+            .optional()?;
         Ok(res)
     }
 

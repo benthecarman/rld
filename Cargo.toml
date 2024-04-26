@@ -7,10 +7,6 @@ edition = "2021"
 name = "rld"
 path = "src/main.rs"
 
-[[bin]]
-name = "rlcli"
-path = "src/cli.rs"
-
 [dependencies]
 log = "0.4.18"
 pretty_env_logger = "0.5.0"

@@ -1,18 +1,19 @@
 #![allow(deprecated)]
 #![allow(unused)]
 
+use crate::lnrpc::channel_point::FundingTxid;
+use crate::lnrpc::fee_limit::Limit;
+use crate::lnrpc::invoice::InvoiceState;
+use crate::lnrpc::invoices_server::Invoices;
+use crate::lnrpc::lightning_server::Lightning;
+use crate::lnrpc::pending_channels_response::{PendingChannel, PendingOpenChannel};
+use crate::lnrpc::*;
 use crate::models::payment::PaymentStatus;
 use crate::models::receive::{InvoiceStatus, Receive};
 use crate::models::received_htlc::ReceivedHtlc;
 use crate::models::routed_payment::RoutedPayment;
 use crate::models::CreatedInvoice;
 use crate::node::Node;
-use crate::proto::channel_point::FundingTxid;
-use crate::proto::fee_limit::Limit;
-use crate::proto::invoice::InvoiceState;
-use crate::proto::lightning_server::Lightning;
-use crate::proto::pending_channels_response::{PendingChannel, PendingOpenChannel};
-use crate::proto::*;
 use bdk::chain::ConfirmationTime;
 use bitcoin::address::Payload;
 use bitcoin::consensus::serialize;
@@ -1947,6 +1948,105 @@ impl Lightning for Node {
     }
 }
 
+#[tonic::async_trait]
+impl Invoices for Node {
+    type SubscribeSingleInvoiceStream = ReceiverStream<Result<Invoice, Status>>;
+
+    async fn subscribe_single_invoice(
+        &self,
+        request: Request<SubscribeSingleInvoiceRequest>,
+    ) -> Result<Response<Self::SubscribeSingleInvoiceStream>, Status> {
+        let req = request.into_inner();
+        if req.r_hash.len() != 32 {
+            return Err(Status::invalid_argument("r_hash must be 32 bytes"));
+        }
+
+        let mut node_rx = self.invoice_broadcast.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Invoice, Status>>(128);
+        tokio::spawn(async move {
+            while let Ok(item) = node_rx.recv().await {
+                if tx.is_closed() {
+                    break;
+                }
+
+                // check if the invoice matches
+                if item.payment_hash().to_vec() != req.r_hash {
+                    continue;
+                }
+
+                let close = matches!(item.status(), InvoiceStatus::Expired | InvoiceStatus::Paid);
+
+                // todo htlcs
+                let invoice = receive_to_lnrpc_invoice(item);
+                tx.send(Ok(invoice)).await.unwrap();
+
+                if close {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn cancel_invoice(
+        &self,
+        request: Request<CancelInvoiceMsg>,
+    ) -> Result<Response<CancelInvoiceResp>, Status> {
+        let req = request.into_inner();
+
+        let payment_hash = lightning::ln::PaymentHash(
+            req.payment_hash
+                .try_into()
+                .map_err(|_| Status::internal("Invalid payment hash"))?,
+        );
+
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let _ = Receive::mark_as_canceled(&mut conn, payment_hash.0)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        self.channel_manager.fail_htlc_backwards(&payment_hash);
+
+        Ok(Response::new(CancelInvoiceResp {}))
+    }
+
+    async fn add_hold_invoice(
+        &self,
+        request: Request<AddHoldInvoiceRequest>,
+    ) -> Result<Response<AddHoldInvoiceResp>, Status> {
+        Err(Status::unimplemented("add_hold_invoice")) // todo
+    }
+
+    async fn settle_invoice(
+        &self,
+        request: Request<SettleInvoiceMsg>,
+    ) -> Result<Response<SettleInvoiceResp>, Status> {
+        let req = request.into_inner();
+
+        let preimage = lightning::ln::PaymentPreimage(
+            req.preimage
+                .try_into()
+                .map_err(|_| Status::internal("Invalid payment hash"))?,
+        );
+
+        // todo should check if the HTLC is still held
+
+        self.channel_manager.claim_funds(preimage);
+
+        Ok(Response::new(SettleInvoiceResp {}))
+    }
+
+    async fn lookup_invoice_v2(
+        &self,
+        _: Request<LookupInvoiceMsg>,
+    ) -> Result<Response<Invoice>, Status> {
+        Err(Status::unimplemented("lookup_invoice_v2")) // todo
+    }
+}
+
 fn receive_to_lnrpc_invoice(invoice: Receive) -> Invoice {
     let bolt11 = invoice.bolt11();
     let state: InvoiceState = match invoice.status() {
@@ -1954,6 +2054,7 @@ fn receive_to_lnrpc_invoice(invoice: Receive) -> Invoice {
         InvoiceStatus::Expired => InvoiceState::Canceled,
         InvoiceStatus::Held => InvoiceState::Accepted,
         InvoiceStatus::Paid => InvoiceState::Settled,
+        InvoiceStatus::Canceled => InvoiceState::Canceled,
     };
 
     let route_hints = bolt11
