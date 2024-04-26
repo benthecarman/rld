@@ -643,7 +643,10 @@ impl Lightning for Node {
             color: "#000000".to_string(),
             num_pending_channels: channels.iter().filter(|c| !c.is_channel_ready).count() as u32,
             num_active_channels: channels.iter().filter(|c| c.is_usable).count() as u32,
-            num_inactive_channels: channels.iter().filter(|c| !c.is_usable).count() as u32,
+            num_inactive_channels: channels
+                .iter()
+                .filter(|c| c.is_channel_ready && !c.is_usable)
+                .count() as u32,
             num_peers,
             block_height: best_block.height,
             block_hash: best_block.block_hash.to_string(),
@@ -1656,35 +1659,40 @@ impl Lightning for Node {
 
         match self.router.find_route(&pk, &route_params, None, inflight) {
             Ok(route) => {
-                let routes = route.paths.into_iter().map(|p| {
-                    let hops: Vec<Hop> = p.hops
-                        .iter()
-                        .map(|hop| Hop {
-                            chan_id: hop.short_channel_id,
-                            chan_capacity: 0,
-                            amt_to_forward: 0,
-                            fee: (hop.fee_msat / 1_000) as i64,
-                            expiry: hop.cltv_expiry_delta,
-                            amt_to_forward_msat: 0,
-                            fee_msat: hop.fee_msat as i64,
-                            pub_key: hop.pubkey.to_string(),
-                            tlv_payload: false,
-                            mpp_record: None,
-                            amp_record: None,
-                            custom_records: Default::default(),
-                            metadata: vec![],
-                        })
-                        .collect();
+                let routes = route
+                    .paths
+                    .into_iter()
+                    .map(|p| {
+                        let hops: Vec<Hop> = p
+                            .hops
+                            .iter()
+                            .map(|hop| Hop {
+                                chan_id: hop.short_channel_id,
+                                chan_capacity: 0,
+                                amt_to_forward: 0,
+                                fee: (hop.fee_msat / 1_000) as i64,
+                                expiry: hop.cltv_expiry_delta,
+                                amt_to_forward_msat: 0,
+                                fee_msat: hop.fee_msat as i64,
+                                pub_key: hop.pubkey.to_string(),
+                                tlv_payload: false,
+                                mpp_record: None,
+                                amp_record: None,
+                                custom_records: Default::default(),
+                                metadata: vec![],
+                            })
+                            .collect();
 
-                    Route {
-                        total_time_lock: p.final_cltv_expiry_delta().unwrap_or_default(),
-                        total_fees: (p.fee_msat() / 1_000) as i64,
-                        total_amt: (p.final_value_msat() / 1_000) as i64,
-                        hops,
-                        total_fees_msat: p.fee_msat() as i64,
-                        total_amt_msat: p.final_value_msat() as i64,
-                    }
-                }).collect();
+                        Route {
+                            total_time_lock: p.final_cltv_expiry_delta().unwrap_or_default(),
+                            total_fees: (p.fee_msat() / 1_000) as i64,
+                            total_amt: (p.final_value_msat() / 1_000) as i64,
+                            hops,
+                            total_fees_msat: p.fee_msat() as i64,
+                            total_amt_msat: p.final_value_msat() as i64,
+                        }
+                    })
+                    .collect();
 
                 let resp = QueryRoutesResponse {
                     routes,
@@ -1939,7 +1947,7 @@ impl Lightning for Node {
     }
 }
 
-fn receive_to_lnrpc_invoice(invoice: crate::models::receive::Receive) -> Invoice {
+fn receive_to_lnrpc_invoice(invoice: Receive) -> Invoice {
     let bolt11 = invoice.bolt11();
     let state: InvoiceState = match invoice.status() {
         InvoiceStatus::Pending => InvoiceState::Open,

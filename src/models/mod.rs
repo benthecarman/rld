@@ -11,8 +11,8 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
-pub mod channel_closure;
 pub mod channel;
+pub mod channel_closure;
 pub mod payment;
 pub mod receive;
 pub mod received_htlc;
