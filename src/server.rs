@@ -690,27 +690,38 @@ impl Lightning for Node {
         let pending_open_channels = channels
             .into_iter()
             .filter(|c| !c.is_channel_ready)
-            .map(|c| PendingOpenChannel {
-                channel: Some(PendingChannel {
-                    remote_node_pub: c.counterparty.node_id.to_string(),
-                    channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
-                    capacity: c.channel_value_satoshis as i64,
-                    local_balance: (c.balance_msat / 1_000) as i64,
-                    remote_balance: (c.channel_value_satoshis - (c.balance_msat / 1_000)) as i64,
-                    local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default()
-                        as i64,
-                    remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
-                    initiator: if c.is_outbound { 1 } else { 2 },
-                    commitment_type: CommitmentType::StaticRemoteKey.into(), // todo handle anchors
-                    num_forwarding_packages: 0,
-                    chan_status_flags: "".to_string(),
-                    private: !c.is_public,
-                    memo: "".to_string(),
-                }),
-                commit_fee: 0,
-                commit_weight: 0,
-                fee_per_kw: 0,
-                funding_expiry_blocks: 0,
+            .map(|c| {
+                let commitment_type = if c.channel_type.as_ref().is_some_and(|t| t.supports_taproot()) {
+                    CommitmentType::SimpleTaproot
+                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_anchors_zero_fee_htlc_tx()) {
+                    CommitmentType::Anchors
+                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_static_remote_key()) {
+                    CommitmentType::StaticRemoteKey
+                } else {
+                    CommitmentType::Legacy
+                };
+                PendingOpenChannel {
+                    channel: Some(PendingChannel {
+                        remote_node_pub: c.counterparty.node_id.to_string(),
+                        channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
+                        capacity: c.channel_value_satoshis as i64,
+                        local_balance: (c.balance_msat / 1_000) as i64,
+                        remote_balance: (c.channel_value_satoshis - (c.balance_msat / 1_000)) as i64,
+                        local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default()
+                            as i64,
+                        remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
+                        initiator: if c.is_outbound { 1 } else { 2 },
+                        commitment_type: commitment_type.into(),
+                        num_forwarding_packages: 0,
+                        chan_status_flags: "".to_string(),
+                        private: !c.is_public,
+                        memo: "".to_string(),
+                    }),
+                    commit_fee: 0,
+                    commit_weight: 0,
+                    fee_per_kw: 0,
+                    funding_expiry_blocks: 0,
+                }
             })
             .collect();
 
@@ -732,47 +743,58 @@ impl Lightning for Node {
         let chans = self.channel_manager.list_channels();
         let channels = chans
             .into_iter()
-            .map(|c| Channel {
-                active: c.is_usable,
-                remote_pubkey: c.counterparty.node_id.to_string(),
-                channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
-                chan_id: c.short_channel_id.unwrap_or_default(),
-                capacity: c.channel_value_satoshis as i64,
-                local_balance: c.balance_msat as i64 / 1_000,
-                remote_balance: c
-                    .counterparty
-                    .outbound_htlc_maximum_msat
-                    .unwrap_or_default() as i64
-                    / 1_000,
-                commit_fee: 0,
-                commit_weight: 0,
-                fee_per_kw: c.feerate_sat_per_1000_weight.unwrap_or_default() as i64,
-                unsettled_balance: 0,
-                total_satoshis_sent: 0,
-                total_satoshis_received: 0,
-                num_updates: 0,
-                pending_htlcs: vec![],
-                csv_delay: c.force_close_spend_delay.unwrap_or_default() as u32,
-                private: !c.is_public,
-                initiator: c.is_outbound,
-                chan_status_flags: "".to_string(),
-                local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default() as i64,
-                remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
-                static_remote_key: true,
-                commitment_type: 0,
-                lifetime: 0,
-                uptime: 0,
-                close_address: "".to_string(),
-                push_amount_sat: 0,
-                thaw_height: 0,
-                local_constraints: None,
-                remote_constraints: None,
-                alias_scids: c.inbound_scid_alias.map(|a| vec![a]).unwrap_or_default(),
-                zero_conf: false,
-                zero_conf_confirmed_scid: 0,
-                peer_alias: "".to_string(),
-                peer_scid_alias: c.outbound_scid_alias.unwrap_or_default(),
-                memo: "".to_string(),
+            .map(|c| {
+                let commitment_type = if c.channel_type.as_ref().is_some_and(|t| t.supports_taproot()) {
+                    CommitmentType::SimpleTaproot
+                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_anchors_zero_fee_htlc_tx()) {
+                    CommitmentType::Anchors
+                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_static_remote_key()) {
+                    CommitmentType::StaticRemoteKey
+                } else {
+                    CommitmentType::Legacy
+                };
+                Channel {
+                    active: c.is_usable,
+                    remote_pubkey: c.counterparty.node_id.to_string(),
+                    channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
+                    chan_id: c.short_channel_id.unwrap_or_default(),
+                    capacity: c.channel_value_satoshis as i64,
+                    local_balance: c.balance_msat as i64 / 1_000,
+                    remote_balance: c
+                        .counterparty
+                        .outbound_htlc_maximum_msat
+                        .unwrap_or_default() as i64
+                        / 1_000,
+                    commit_fee: 0,
+                    commit_weight: 0,
+                    fee_per_kw: c.feerate_sat_per_1000_weight.unwrap_or_default() as i64,
+                    unsettled_balance: 0,
+                    total_satoshis_sent: 0,
+                    total_satoshis_received: 0,
+                    num_updates: 0,
+                    pending_htlcs: vec![],
+                    csv_delay: c.force_close_spend_delay.unwrap_or_default() as u32,
+                    private: !c.is_public,
+                    initiator: c.is_outbound,
+                    chan_status_flags: "".to_string(),
+                    local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default() as i64,
+                    remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
+                    static_remote_key: true,
+                    commitment_type: commitment_type.into(),
+                    lifetime: 0,
+                    uptime: 0,
+                    close_address: "".to_string(),
+                    push_amount_sat: 0,
+                    thaw_height: 0,
+                    local_constraints: None,
+                    remote_constraints: None,
+                    alias_scids: c.inbound_scid_alias.map(|a| vec![a]).unwrap_or_default(),
+                    zero_conf: false,
+                    zero_conf_confirmed_scid: 0,
+                    peer_alias: "".to_string(),
+                    peer_scid_alias: c.outbound_scid_alias.unwrap_or_default(),
+                    memo: "".to_string(),
+                }
             })
             .collect();
 
