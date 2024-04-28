@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 pub mod channel;
 pub mod channel_closure;
+pub mod connect_info;
 pub mod payment;
 pub mod receive;
 pub mod received_htlc;

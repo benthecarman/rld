@@ -7,6 +7,7 @@ use crate::logger::RldLogger;
 use crate::models;
 use crate::models::channel::Channel;
 use crate::models::channel_closure::ChannelClosure;
+use crate::models::connect_info::ConnectionInfo;
 use crate::models::payment::{Payment, PaymentStatus};
 use crate::models::receive::Receive;
 use crate::models::CreatedInvoice;
@@ -20,7 +21,7 @@ use bitcoin::secp256k1::{All, PublicKey, Secp256k1, ThirtyTwoByteHash};
 use bitcoin::{BlockHash, Network, OutPoint};
 use bitcoincore_rpc::{Auth, RpcApi};
 use diesel::r2d2::{ConnectionManager, Pool};
-use diesel::PgConnection;
+use diesel::{Connection, PgConnection};
 use lightning::blinded_path::EmptyNodeIdLookUp;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
@@ -63,6 +64,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -587,13 +589,14 @@ impl Node {
         });
 
         // Reconnect to peers every 120 seconds
-        // todo doesn't work for peers that are not in the graph
         let reconnect_graph = network_graph.clone();
         let reconnect_peer_manager = peer_manager.clone();
         let reconnect_channel_manager = channel_manager.clone();
+        let reconnect_db_pool = db_pool.clone();
         let reconnect_logger = logger.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(120));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
                 let channels = reconnect_channel_manager.list_channels();
@@ -623,16 +626,54 @@ impl Node {
                                     .flat_map(|a| a.to_socket_addrs().unwrap_or_default())
                                     .collect::<Vec<_>>()
                             })
+                            .unwrap_or_default()
                     };
 
-                    for addr in addresses.unwrap_or_default() {
+                    let mut connected = false;
+                    for addr in addresses {
                         log_info!(reconnect_logger, "Connecting to peer: {peer} at: {addr}");
                         match Self::do_connect_peer(reconnect_peer_manager.clone(), peer, addr)
                             .await
                         {
-                            Ok(_) => break,
+                            Ok(_) => {
+                                connected = true;
+                                break;
+                            }
                             Err(e) => {
                                 log_error!(reconnect_logger, "Error connecting to peer: {e}")
+                            }
+                        }
+                    }
+
+                    if !connected {
+                        let Ok(mut conn) = reconnect_db_pool.get() else {
+                            log_error!(
+                                reconnect_logger,
+                                "Could not get database connection for reconnect thread"
+                            );
+                            continue;
+                        };
+                        let info = ConnectionInfo::find_by_node_id(&mut conn, peer.encode())
+                            .unwrap_or_default();
+
+                        for addr in info {
+                            log_info!(reconnect_logger, "Connecting to peer: {peer} at: {addr}");
+                            if let Ok(addr) = SocketAddr::from_str(&addr) {
+                                match Self::do_connect_peer(
+                                    reconnect_peer_manager.clone(),
+                                    peer,
+                                    addr,
+                                )
+                                .await
+                                {
+                                    Ok(_) => break,
+                                    Err(e) => {
+                                        log_error!(
+                                            reconnect_logger,
+                                            "Error connecting to peer: {e}"
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -916,6 +957,12 @@ impl Node {
                 return Ok(());
             }
         }
+
+        // save connection info
+        let mut conn = self.db_pool.get()?;
+        ConnectionInfo::upsert(&mut conn, pubkey.encode(), peer_addr.to_string(), false)?;
+        drop(conn);
+
         let res = Self::do_connect_peer(self.peer_manager.clone(), pubkey, peer_addr).await;
         if res.is_err() {
             log_error!(self.logger, "ERROR: failed to connect to peer");
@@ -1015,18 +1062,34 @@ impl Node {
         sats_per_vbyte: Option<i32>,
         private: bool,
     ) -> anyhow::Result<(ChannelId, u128)> {
+        // check we're connected to the peer
+        if !self
+            .peer_manager
+            .list_peers()
+            .iter()
+            .any(|p| p.counterparty_node_id == pubkey)
+        {
+            return Err(anyhow!("Not connected to peer"));
+        }
+
         // save params to db
         let mut conn = self.db_pool.get()?;
-        let params = Channel::create(
-            &mut conn,
-            pubkey.encode(),
-            sats_per_vbyte,
-            push_msat as i64,
-            private,
-            true,
-            amount_sat as i64,
-            false,
-        )?;
+        let params = conn.transaction::<_, anyhow::Error, _>(|conn| {
+            // set reconnect flag on connection info
+            ConnectionInfo::set_reconnect(conn, pubkey.encode())?;
+
+            let params = Channel::create(
+                conn,
+                pubkey.encode(),
+                sats_per_vbyte,
+                push_msat as i64,
+                private,
+                true,
+                amount_sat as i64,
+                false,
+            )?;
+            Ok(params)
+        })?;
 
         let user_channel_id: u128 = params.id.try_into()?;
         let mut config = default_user_config();

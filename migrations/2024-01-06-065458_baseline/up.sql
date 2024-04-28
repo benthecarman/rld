@@ -26,7 +26,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER update_updated_at_trigger
-    BEFORE INSERT
+    BEFORE INSERT OR UPDATE
     ON receives
     FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
@@ -50,7 +50,7 @@ CREATE TABLE payments
 
 -- create trigger to update updated_at on insert
 CREATE TRIGGER update_updated_at_trigger
-    BEFORE INSERT
+    BEFORE INSERT OR UPDATE
     ON payments
     FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
@@ -75,7 +75,7 @@ CREATE TABLE channels
 
 -- create trigger to update updated_at on insert
 CREATE TRIGGER update_updated_at_trigger
-    BEFORE INSERT
+    BEFORE INSERT OR UPDATE
     ON channels
     FOR EACH ROW
 EXECUTE PROCEDURE update_updated_at();
@@ -111,3 +111,21 @@ CREATE TABLE received_htlcs
 );
 
 create unique index received_htlcs_receive_id_index on received_htlcs (receive_id);
+
+CREATE TABLE connection_info
+(
+    node_id           bytea     NOT NULL,
+    connection_string TEXT      NOT NULL,
+    reconnect         BOOLEAN   NOT NULL,
+    updated_at        timestamp NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (node_id, connection_string)
+);
+
+-- create trigger to update updated_at on insert or update
+CREATE TRIGGER update_updated_at_trigger
+    BEFORE INSERT OR UPDATE
+    ON connection_info
+    FOR EACH ROW
+EXECUTE PROCEDURE update_updated_at();
+
+create index connection_info_node_id_index on connection_info (node_id);

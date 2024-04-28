@@ -1,3 +1,4 @@
+drop table connection_info;
 drop table routed_payments;
 drop table received_htlcs;
 drop table channel_closures;

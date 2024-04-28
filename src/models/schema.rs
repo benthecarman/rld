@@ -30,6 +30,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    connection_info (node_id, connection_string) {
+        node_id -> Bytea,
+        connection_string -> Text,
+        reconnect -> Bool,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     payments (id) {
         id -> Int4,
         payment_hash -> Bytea,
@@ -91,6 +100,7 @@ diesel::joinable!(received_htlcs -> receives (receive_id));
 diesel::allow_tables_to_appear_in_same_query!(
     channel_closures,
     channels,
+    connection_info,
     payments,
     received_htlcs,
     receives,
