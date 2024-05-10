@@ -65,6 +65,7 @@ impl Channel {
         self.opening_tx = Some(tx.encode());
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         conn: &mut PgConnection,
         node_id: Vec<u8>,
