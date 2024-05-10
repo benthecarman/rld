@@ -1,10 +1,11 @@
 #![allow(deprecated)]
 #![allow(unused)]
 
+use crate::invoicesrpc::invoices_server::Invoices;
+use crate::invoicesrpc::*;
 use crate::lnrpc::channel_point::FundingTxid;
 use crate::lnrpc::fee_limit::Limit;
 use crate::lnrpc::invoice::InvoiceState;
-use crate::lnrpc::invoices_server::Invoices;
 use crate::lnrpc::lightning_server::Lightning;
 use crate::lnrpc::pending_channels_response::{PendingChannel, PendingOpenChannel};
 use crate::lnrpc::*;
@@ -14,6 +15,29 @@ use crate::models::received_htlc::ReceivedHtlc;
 use crate::models::routed_payment::RoutedPayment;
 use crate::models::CreatedInvoice;
 use crate::node::Node;
+use crate::signrpc::signer_server::Signer;
+use crate::signrpc::{
+    InputScriptResp, MuSig2CleanupRequest, MuSig2CleanupResponse, MuSig2CombineKeysRequest,
+    MuSig2CombineKeysResponse, MuSig2CombineSigRequest, MuSig2CombineSigResponse,
+    MuSig2RegisterNoncesRequest, MuSig2RegisterNoncesResponse, MuSig2SessionRequest,
+    MuSig2SessionResponse, MuSig2SignRequest, MuSig2SignResponse, SharedKeyRequest,
+    SharedKeyResponse, SignMessageReq, SignMessageResp, SignReq, SignResp, VerifyMessageReq,
+    VerifyMessageResp,
+};
+use crate::walletrpc::wallet_kit_server::WalletKit;
+use crate::walletrpc::{
+    AddrRequest, AddrResponse, BumpFeeRequest, BumpFeeResponse, FinalizePsbtRequest,
+    FinalizePsbtResponse, FundPsbtRequest, FundPsbtResponse, ImportAccountRequest,
+    ImportAccountResponse, ImportPublicKeyRequest, ImportPublicKeyResponse, ImportTapscriptRequest,
+    ImportTapscriptResponse, KeyReq, LabelTransactionRequest, LabelTransactionResponse,
+    LeaseOutputRequest, LeaseOutputResponse, ListAccountsRequest, ListAccountsResponse,
+    ListAddressesRequest, ListAddressesResponse, ListLeasesRequest, ListLeasesResponse,
+    ListSweepsRequest, ListSweepsResponse, PendingSweepsRequest, PendingSweepsResponse,
+    PublishResponse, ReleaseOutputRequest, ReleaseOutputResponse, RequiredReserveRequest,
+    RequiredReserveResponse, SendOutputsRequest, SendOutputsResponse, SignMessageWithAddrRequest,
+    SignMessageWithAddrResponse, SignPsbtRequest, SignPsbtResponse, VerifyMessageWithAddrRequest,
+    VerifyMessageWithAddrResponse,
+};
 use bdk::chain::ConfirmationTime;
 use bitcoin::address::Payload;
 use bitcoin::consensus::serialize;
@@ -691,11 +715,23 @@ impl Lightning for Node {
             .into_iter()
             .filter(|c| !c.is_channel_ready)
             .map(|c| {
-                let commitment_type = if c.channel_type.as_ref().is_some_and(|t| t.supports_taproot()) {
+                let commitment_type = if c
+                    .channel_type
+                    .as_ref()
+                    .is_some_and(|t| t.supports_taproot())
+                {
                     CommitmentType::SimpleTaproot
-                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_anchors_zero_fee_htlc_tx()) {
+                } else if c
+                    .channel_type
+                    .as_ref()
+                    .is_some_and(|t| t.supports_anchors_zero_fee_htlc_tx())
+                {
                     CommitmentType::Anchors
-                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_static_remote_key()) {
+                } else if c
+                    .channel_type
+                    .as_ref()
+                    .is_some_and(|t| t.supports_static_remote_key())
+                {
                     CommitmentType::StaticRemoteKey
                 } else {
                     CommitmentType::Legacy
@@ -706,10 +742,12 @@ impl Lightning for Node {
                         channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
                         capacity: c.channel_value_satoshis as i64,
                         local_balance: (c.balance_msat / 1_000) as i64,
-                        remote_balance: (c.channel_value_satoshis - (c.balance_msat / 1_000)) as i64,
+                        remote_balance: (c.channel_value_satoshis - (c.balance_msat / 1_000))
+                            as i64,
                         local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default()
                             as i64,
-                        remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
+                        remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve
+                            as i64,
                         initiator: if c.is_outbound { 1 } else { 2 },
                         commitment_type: commitment_type.into(),
                         num_forwarding_packages: 0,
@@ -744,11 +782,23 @@ impl Lightning for Node {
         let channels = chans
             .into_iter()
             .map(|c| {
-                let commitment_type = if c.channel_type.as_ref().is_some_and(|t| t.supports_taproot()) {
+                let commitment_type = if c
+                    .channel_type
+                    .as_ref()
+                    .is_some_and(|t| t.supports_taproot())
+                {
                     CommitmentType::SimpleTaproot
-                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_anchors_zero_fee_htlc_tx()) {
+                } else if c
+                    .channel_type
+                    .as_ref()
+                    .is_some_and(|t| t.supports_anchors_zero_fee_htlc_tx())
+                {
                     CommitmentType::Anchors
-                } else if c.channel_type.as_ref().is_some_and(|t| t.supports_static_remote_key()) {
+                } else if c
+                    .channel_type
+                    .as_ref()
+                    .is_some_and(|t| t.supports_static_remote_key())
+                {
                     CommitmentType::StaticRemoteKey
                 } else {
                     CommitmentType::Legacy
@@ -777,7 +827,8 @@ impl Lightning for Node {
                     private: !c.is_public,
                     initiator: c.is_outbound,
                     chan_status_flags: "".to_string(),
-                    local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default() as i64,
+                    local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default()
+                        as i64,
                     remote_chan_reserve_sat: c.counterparty.unspendable_punishment_reserve as i64,
                     static_remote_key: true,
                     commitment_type: commitment_type.into(),
@@ -2066,6 +2117,264 @@ impl Invoices for Node {
         _: Request<LookupInvoiceMsg>,
     ) -> Result<Response<Invoice>, Status> {
         Err(Status::unimplemented("lookup_invoice_v2")) // todo
+    }
+}
+
+#[tonic::async_trait]
+impl Signer for Node {
+    async fn sign_output_raw(
+        &self,
+        request: Request<SignReq>,
+    ) -> Result<Response<SignResp>, Status> {
+        Err(Status::unimplemented("sign_output_raw")) // todo
+    }
+
+    async fn compute_input_script(
+        &self,
+        request: Request<SignReq>,
+    ) -> Result<Response<InputScriptResp>, Status> {
+        Err(Status::unimplemented("compute_input_script")) // todo
+    }
+
+    async fn sign_message(
+        &self,
+        request: Request<SignMessageReq>,
+    ) -> Result<Response<SignMessageResp>, Status> {
+        Err(Status::unimplemented("sign_message")) // todo
+    }
+
+    async fn verify_message(
+        &self,
+        request: Request<VerifyMessageReq>,
+    ) -> Result<Response<VerifyMessageResp>, Status> {
+        Err(Status::unimplemented("verify_message")) // todo
+    }
+
+    async fn derive_shared_key(
+        &self,
+        request: Request<SharedKeyRequest>,
+    ) -> Result<Response<SharedKeyResponse>, Status> {
+        Err(Status::unimplemented("derive_shared_key")) // todo
+    }
+
+    async fn mu_sig2_combine_keys(
+        &self,
+        request: Request<MuSig2CombineKeysRequest>,
+    ) -> Result<Response<MuSig2CombineKeysResponse>, Status> {
+        Err(Status::unimplemented("mu_sig2_combine_keys")) // todo
+    }
+
+    async fn mu_sig2_create_session(
+        &self,
+        request: Request<MuSig2SessionRequest>,
+    ) -> Result<Response<MuSig2SessionResponse>, Status> {
+        Err(Status::unimplemented("mu_sig2_create_session")) // todo
+    }
+
+    async fn mu_sig2_register_nonces(
+        &self,
+        request: Request<MuSig2RegisterNoncesRequest>,
+    ) -> Result<Response<MuSig2RegisterNoncesResponse>, Status> {
+        Err(Status::unimplemented("mu_sig2_register_nonces")) // todo
+    }
+
+    async fn mu_sig2_sign(
+        &self,
+        request: Request<MuSig2SignRequest>,
+    ) -> Result<Response<MuSig2SignResponse>, Status> {
+        Err(Status::unimplemented("mu_sig2_sign")) // todo
+    }
+
+    async fn mu_sig2_combine_sig(
+        &self,
+        request: Request<MuSig2CombineSigRequest>,
+    ) -> Result<Response<MuSig2CombineSigResponse>, Status> {
+        Err(Status::unimplemented("mu_sig2_combine_sig")) // todo
+    }
+
+    async fn mu_sig2_cleanup(
+        &self,
+        request: Request<MuSig2CleanupRequest>,
+    ) -> Result<Response<MuSig2CleanupResponse>, Status> {
+        Err(Status::unimplemented("mu_sig2_cleanup")) // todo
+    }
+}
+
+#[tonic::async_trait]
+impl WalletKit for Node {
+    async fn list_unspent(
+        &self,
+        request: Request<crate::walletrpc::ListUnspentRequest>,
+    ) -> Result<Response<crate::walletrpc::ListUnspentResponse>, Status> {
+        Err(Status::unimplemented("list_unspent")) // todo
+    }
+
+    async fn lease_output(
+        &self,
+        request: Request<LeaseOutputRequest>,
+    ) -> Result<Response<LeaseOutputResponse>, Status> {
+        Err(Status::unimplemented("lease_output")) // todo
+    }
+
+    async fn release_output(
+        &self,
+        request: Request<ReleaseOutputRequest>,
+    ) -> Result<Response<ReleaseOutputResponse>, Status> {
+        Err(Status::unimplemented("release_output")) // todo
+    }
+
+    async fn list_leases(
+        &self,
+        request: Request<ListLeasesRequest>,
+    ) -> Result<Response<ListLeasesResponse>, Status> {
+        Err(Status::unimplemented("list_leases")) // todo
+    }
+
+    async fn derive_next_key(
+        &self,
+        request: Request<KeyReq>,
+    ) -> Result<Response<crate::signrpc::KeyDescriptor>, Status> {
+        Err(Status::unimplemented("derive_next_key")) // todo
+    }
+
+    async fn derive_key(
+        &self,
+        request: Request<crate::signrpc::KeyLocator>,
+    ) -> Result<Response<crate::signrpc::KeyDescriptor>, Status> {
+        Err(Status::unimplemented("derive_key")) // todo
+    }
+
+    async fn next_addr(
+        &self,
+        request: Request<AddrRequest>,
+    ) -> Result<Response<AddrResponse>, Status> {
+        Err(Status::unimplemented("next_addr")) // todo
+    }
+
+    async fn list_accounts(
+        &self,
+        request: Request<ListAccountsRequest>,
+    ) -> Result<Response<ListAccountsResponse>, Status> {
+        Err(Status::unimplemented("list_accounts")) // todo
+    }
+
+    async fn required_reserve(
+        &self,
+        request: Request<RequiredReserveRequest>,
+    ) -> Result<Response<RequiredReserveResponse>, Status> {
+        Err(Status::unimplemented("required_reserve")) // todo
+    }
+
+    async fn list_addresses(
+        &self,
+        request: Request<ListAddressesRequest>,
+    ) -> Result<Response<ListAddressesResponse>, Status> {
+        Err(Status::unimplemented("list_addresses")) // todo
+    }
+
+    async fn sign_message_with_addr(
+        &self,
+        request: Request<SignMessageWithAddrRequest>,
+    ) -> Result<Response<SignMessageWithAddrResponse>, Status> {
+        Err(Status::unimplemented("sign_message_with_addr")) // todo
+    }
+
+    async fn verify_message_with_addr(
+        &self,
+        request: Request<VerifyMessageWithAddrRequest>,
+    ) -> Result<Response<VerifyMessageWithAddrResponse>, Status> {
+        Err(Status::unimplemented("verify_message_with_addr")) // todo
+    }
+
+    async fn import_account(
+        &self,
+        request: Request<ImportAccountRequest>,
+    ) -> Result<Response<ImportAccountResponse>, Status> {
+        Err(Status::unimplemented("import_account")) // todo
+    }
+
+    async fn import_public_key(
+        &self,
+        request: Request<ImportPublicKeyRequest>,
+    ) -> Result<Response<ImportPublicKeyResponse>, Status> {
+        Err(Status::unimplemented("import_public_key")) // todo
+    }
+
+    async fn import_tapscript(
+        &self,
+        request: Request<ImportTapscriptRequest>,
+    ) -> Result<Response<ImportTapscriptResponse>, Status> {
+        Err(Status::unimplemented("import_tapscript")) // todo
+    }
+
+    async fn publish_transaction(
+        &self,
+        request: Request<crate::walletrpc::Transaction>,
+    ) -> Result<Response<PublishResponse>, Status> {
+        Err(Status::unimplemented("publish_transaction")) // todo
+    }
+
+    async fn send_outputs(
+        &self,
+        request: Request<SendOutputsRequest>,
+    ) -> Result<Response<SendOutputsResponse>, Status> {
+        Err(Status::unimplemented("send_outputs")) // todo
+    }
+
+    async fn estimate_fee(
+        &self,
+        request: Request<crate::walletrpc::EstimateFeeRequest>,
+    ) -> Result<Response<crate::walletrpc::EstimateFeeResponse>, Status> {
+        Err(Status::unimplemented("estimate_fee")) // todo
+    }
+
+    async fn pending_sweeps(
+        &self,
+        request: Request<PendingSweepsRequest>,
+    ) -> Result<Response<PendingSweepsResponse>, Status> {
+        Err(Status::unimplemented("pending_sweeps")) // todo
+    }
+
+    async fn bump_fee(
+        &self,
+        request: Request<BumpFeeRequest>,
+    ) -> Result<Response<BumpFeeResponse>, Status> {
+        Err(Status::unimplemented("bump_fee")) // todo
+    }
+
+    async fn list_sweeps(
+        &self,
+        request: Request<ListSweepsRequest>,
+    ) -> Result<Response<ListSweepsResponse>, Status> {
+        Err(Status::unimplemented("list_sweeps")) // todo
+    }
+
+    async fn label_transaction(
+        &self,
+        request: Request<LabelTransactionRequest>,
+    ) -> Result<Response<LabelTransactionResponse>, Status> {
+        Err(Status::unimplemented("label_transaction")) // todo
+    }
+
+    async fn fund_psbt(
+        &self,
+        request: Request<FundPsbtRequest>,
+    ) -> Result<Response<FundPsbtResponse>, Status> {
+        Err(Status::unimplemented("fund_psbt")) // todo
+    }
+
+    async fn sign_psbt(
+        &self,
+        request: Request<SignPsbtRequest>,
+    ) -> Result<Response<SignPsbtResponse>, Status> {
+        Err(Status::unimplemented("sign_psbt")) // todo
+    }
+
+    async fn finalize_psbt(
+        &self,
+        request: Request<FinalizePsbtRequest>,
+    ) -> Result<Response<FinalizePsbtResponse>, Status> {
+        Err(Status::unimplemented("finalize_psbt")) // todo
     }
 }
 

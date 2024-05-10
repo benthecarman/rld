@@ -2,10 +2,10 @@
 #![allow(clippy::large_enum_variant)]
 
 use crate::config::Config;
+use crate::lnrpc::lightning_server::LightningServer;
 use crate::logger::RldLogger;
 use crate::models::MIGRATIONS;
 use crate::node::Node;
-use crate::lnrpc::lightning_server::LightningServer;
 use bip39::Mnemonic;
 use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
@@ -47,7 +47,18 @@ mod server;
 
 pub mod lnrpc {
     tonic::include_proto!("lnrpc");
+}
+
+pub mod invoicesrpc {
     tonic::include_proto!("invoicesrpc");
+}
+
+pub mod signrpc {
+    tonic::include_proto!("signrpc");
+}
+
+pub mod walletrpc {
+    tonic::include_proto!("walletrpc");
 }
 
 #[tokio::main]
