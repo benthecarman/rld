@@ -1,7 +1,12 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let protos = ["lightning.proto", "invoicesrpc/invoices.proto", "signrpc/signer.proto", "walletrpc/walletkit.proto"];
+    let protos = [
+        "lightning.proto",
+        "invoicesrpc/invoices.proto",
+        "signrpc/signer.proto",
+        "walletrpc/walletkit.proto",
+    ];
 
     let dir = PathBuf::from("lnrpc");
 

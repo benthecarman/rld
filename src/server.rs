@@ -39,15 +39,18 @@ use crate::walletrpc::{
     VerifyMessageWithAddrResponse,
 };
 use bdk::chain::ConfirmationTime;
+use bdk::miniscript::psbt::PsbtExt;
 use bitcoin::address::Payload;
-use bitcoin::consensus::serialize;
+use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::{Message, PublicKey, ThirtyTwoByteHash};
 use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
+use lightning::events::bump_transaction::WalletSource;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{NodeSigner, Recipient};
@@ -650,6 +653,7 @@ impl Lightning for Node {
         let num_peers = self.peer_manager.list_peers().len() as u32;
         let channels = self.channel_manager.list_channels();
         let best_block = self.channel_manager.current_best_block();
+        let wallet_block = self.wallet.sync_height().unwrap_or_default();
 
         let chain = Chain {
             chain: "bitcoin".to_string(),
@@ -676,7 +680,7 @@ impl Lightning for Node {
             block_height: best_block.height,
             block_hash: best_block.block_hash.to_string(),
             best_header_timestamp: 0,
-            synced_to_chain: true, // idk if correct
+            synced_to_chain: wallet_block.height >= best_block.height,
             synced_to_graph: true, // idk if correct
             testnet: self.network != Network::Bitcoin,
             chains: vec![chain],
@@ -2206,7 +2210,75 @@ impl WalletKit for Node {
         &self,
         request: Request<crate::walletrpc::ListUnspentRequest>,
     ) -> Result<Response<crate::walletrpc::ListUnspentResponse>, Status> {
-        Err(Status::unimplemented("list_unspent")) // todo
+        let crate::walletrpc::ListUnspentRequest {
+            min_confs,
+            max_confs,
+            account,
+            unconfirmed_only,
+        } = request.into_inner();
+
+        if !account.is_empty() || account != "default" {
+            return Err(Status::unimplemented("account is not supported"));
+        }
+
+        let utxos = self
+            .wallet
+            .list_utxos()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let current_height = self
+            .bitcoind
+            .get_block_count()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let utxos = utxos
+            .into_iter()
+            .filter_map(|u| {
+                let confs = match u.confirmation_time {
+                    ConfirmationTime::Confirmed { height, .. } => {
+                        current_height as i32 - height as i32 + 1
+                    }
+                    ConfirmationTime::Unconfirmed { .. } => 0,
+                };
+
+                if unconfirmed_only && confs > 0 {
+                    return None;
+                }
+
+                if confs >= min_confs && confs <= max_confs {
+                    let address_type = if u.txout.script_pubkey.is_v1_p2tr() {
+                        AddressType::TaprootPubkey
+                    } else if u.txout.script_pubkey.is_v0_p2wpkh() {
+                        AddressType::WitnessPubkeyHash
+                    } else if u.txout.script_pubkey.is_p2sh() {
+                        AddressType::NestedPubkeyHash
+                    } else {
+                        return None; // unsupported address type
+                    };
+                    let address = Address::from_script(&u.txout.script_pubkey, self.network)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                    Some(Utxo {
+                        address_type: address_type.into(),
+                        address,
+                        amount_sat: u.txout.value as i64,
+                        pk_script: u.txout.script_pubkey.to_hex_string(),
+                        outpoint: Some(OutPoint {
+                            txid_bytes: u.outpoint.txid.encode(),
+                            txid_str: u.outpoint.txid.to_string(),
+                            output_index: u.outpoint.vout,
+                        }),
+                        confirmations: confs as i64,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(Response::new(crate::walletrpc::ListUnspentResponse {
+            utxos,
+        }))
     }
 
     async fn lease_output(
@@ -2248,7 +2320,31 @@ impl WalletKit for Node {
         &self,
         request: Request<AddrRequest>,
     ) -> Result<Response<AddrResponse>, Status> {
-        Err(Status::unimplemented("next_addr")) // todo
+        let req = request.into_inner();
+
+        if req.account.is_empty() || req.account != "default" {
+            return Err(Status::unimplemented("account is not supported"));
+        }
+
+        if req.r#type != AddressType::TaprootPubkey as i32 {
+            return Err(Status::unimplemented("address type is not supported"));
+        }
+
+        let info = if req.change {
+            self.wallet
+                .get_change_address()
+                .map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            self.wallet
+                .get_new_address()
+                .map_err(|e| Status::internal(e.to_string()))?
+        };
+
+        let response = AddrResponse {
+            addr: info.address.to_string(),
+        };
+
+        Ok(Response::new(response))
     }
 
     async fn list_accounts(
@@ -2311,21 +2407,83 @@ impl WalletKit for Node {
         &self,
         request: Request<crate::walletrpc::Transaction>,
     ) -> Result<Response<PublishResponse>, Status> {
-        Err(Status::unimplemented("publish_transaction")) // todo
+        let req = request.into_inner();
+
+        let tx: bitcoin::transaction::Transaction =
+            deserialize(&req.tx_hex).map_err(|e| Status::invalid_argument(e.to_string()))?;
+
+        let txid = self
+            .wallet
+            .broadcast_transaction(tx)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let resp = PublishResponse {
+            publish_error: "".to_string(),
+        };
+        Ok(Response::new(resp))
     }
 
     async fn send_outputs(
         &self,
         request: Request<SendOutputsRequest>,
     ) -> Result<Response<SendOutputsResponse>, Status> {
-        Err(Status::unimplemented("send_outputs")) // todo
+        let req = request.into_inner();
+
+        let fee_rate = if req.sat_per_kw != 0 {
+            Some(FeeRate::from_sat_per_kwu(req.sat_per_kw as u64))
+        } else {
+            None
+        };
+
+        let outputs = req
+            .outputs
+            .into_iter()
+            .map(|o| TxOut {
+                value: o.value as u64,
+                script_pubkey: ScriptBuf::from(o.pk_script.to_vec()),
+            })
+            .collect();
+
+        let txid = self
+            .wallet
+            .send_to_outputs(outputs, fee_rate)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let tx = self
+            .wallet
+            .get_transaction(txid)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if let Some(tx) = tx {
+            let resp = SendOutputsResponse {
+                raw_tx: serialize(&tx.transaction),
+            };
+            Ok(Response::new(resp))
+        } else {
+            Err(Status::internal("Could not get transaction"))
+        }
     }
 
     async fn estimate_fee(
         &self,
         request: Request<crate::walletrpc::EstimateFeeRequest>,
     ) -> Result<Response<crate::walletrpc::EstimateFeeResponse>, Status> {
-        Err(Status::unimplemented("estimate_fee")) // todo
+        let req = request.into_inner();
+
+        let res = self
+            .bitcoind
+            .estimate_smart_fee(req.conf_target as u16, None)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if let Some(per_kb) = res.fee_rate {
+            let fee_rate = FeeRate::from_sat_per_vb_unchecked(per_kb.to_sat() / 1_000);
+            let response = crate::walletrpc::EstimateFeeResponse {
+                sat_per_kw: fee_rate.to_sat_per_kwu() as i64,
+            };
+
+            Ok(Response::new(response))
+        } else {
+            Err(Status::internal("Error getting fee rate"))
+        }
     }
 
     async fn pending_sweeps(
@@ -2367,14 +2525,47 @@ impl WalletKit for Node {
         &self,
         request: Request<SignPsbtRequest>,
     ) -> Result<Response<SignPsbtResponse>, Status> {
-        Err(Status::unimplemented("sign_psbt")) // todo
+        let req = request.into_inner();
+
+        let psbt = Psbt::deserialize(&req.funded_psbt)
+            .map_err(|e| Status::invalid_argument(format!("Could not deserialize psbt: {e:?}")))?;
+
+        let psbt = self
+            .wallet
+            .sign_psbt(psbt)
+            .map_err(|e| Status::invalid_argument(format!("Could not sign psbt: {e:?}")))?;
+
+        let resp = SignPsbtResponse {
+            signed_psbt: psbt.serialize(),
+            signed_inputs: vec![], // todo
+        };
+        Ok(Response::new(resp))
     }
 
     async fn finalize_psbt(
         &self,
         request: Request<FinalizePsbtRequest>,
     ) -> Result<Response<FinalizePsbtResponse>, Status> {
-        Err(Status::unimplemented("finalize_psbt")) // todo
+        let req = request.into_inner();
+
+        let psbt = Psbt::deserialize(&req.funded_psbt)
+            .map_err(|e| Status::invalid_argument(format!("Could not deserialize psbt: {e:?}")))?;
+
+        let psbt = self
+            .wallet
+            .sign_psbt(psbt)
+            .map_err(|e| Status::invalid_argument(format!("Could not sign psbt: {e:?}")))?;
+
+        let raw_final_tx = psbt
+            .extract(&self.secp)
+            .map(|tx| serialize(&tx))
+            .unwrap_or(vec![]);
+
+        let resp = FinalizePsbtResponse {
+            signed_psbt: psbt.serialize(),
+            raw_final_tx,
+        };
+        Ok(Response::new(resp))
     }
 }
 

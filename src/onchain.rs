@@ -3,7 +3,7 @@ use crate::keys::coin_type_from_network;
 use crate::logger::RldLogger;
 use anyhow::anyhow;
 use bdk::chain::indexed_tx_graph::Indexer;
-use bdk::chain::{BlockId, ConfirmationTime};
+use bdk::chain::{BlockId, ChainOracle, ConfirmationTime};
 use bdk::psbt::PsbtUtils;
 use bdk::template::DescriptorTemplateOut;
 use bdk::wallet::{AddressIndex, AddressInfo, Balance};
@@ -12,7 +12,7 @@ use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
 use bitcoin::address::Payload;
 use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
-use bitcoin::psbt::PartiallySignedTransaction;
+use bitcoin::psbt::{PartiallySignedTransaction, Psbt};
 use bitcoin::{Address, FeeRate, Network, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use lightning::events::bump_transaction::{Utxo, WalletSource};
@@ -205,7 +205,7 @@ impl OnChainWallet {
         });
     }
 
-    pub fn broadcast_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+    pub fn broadcast_transaction(&self, tx: Transaction) -> anyhow::Result<Txid> {
         let txid = tx.txid();
         log_info!(self.logger, "Broadcasting transaction: {txid}");
 
@@ -224,7 +224,7 @@ impl OnChainWallet {
             log_warn!(self.logger, "ERROR: Could not sync broadcasted tx ({txid}), will be synced in next iteration: {e:?}");
         }
 
-        Ok(())
+        Ok(txid)
     }
 
     pub(crate) fn insert_tx(
@@ -272,11 +272,36 @@ impl OnChainWallet {
         wallet.get_balance()
     }
 
+    pub fn sync_height(&self) -> anyhow::Result<BlockId> {
+        let wallet = self.wallet.read().unwrap();
+        Ok(wallet.local_chain().get_chain_tip()?)
+    }
+
     pub fn get_new_address(&self) -> anyhow::Result<AddressInfo> {
         let mut wallet = self.wallet.write().unwrap();
         let address = wallet.try_get_address(AddressIndex::New)?;
 
         Ok(address)
+    }
+
+    pub fn get_change_address(&self) -> anyhow::Result<AddressInfo> {
+        let mut wallet = self.wallet.write().unwrap();
+        let address = wallet.try_get_internal_address(AddressIndex::New)?;
+
+        Ok(address)
+    }
+
+    pub fn sign_psbt(&self, mut psbt: Psbt) -> anyhow::Result<Psbt> {
+        let wallet = self.wallet.read().unwrap();
+
+        // need to trust witness_utxo for signing since that's LDK sets in the psbt
+        let sign_options = SignOptions {
+            trust_witness_utxo: true,
+            ..Default::default()
+        };
+        wallet.sign(&mut psbt, sign_options)?;
+
+        Ok(psbt)
     }
 
     pub fn create_signed_psbt_to_spk(
