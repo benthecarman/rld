@@ -78,7 +78,7 @@ pub struct OutputDetails {
 }
 
 #[derive(Clone)]
-pub(crate) struct OnChainWallet {
+pub struct OnChainWallet {
     pub(crate) wallet: Arc<RwLock<Wallet<Store<bdk::wallet::ChangeSet>>>>,
     pub network: Network,
     pub fees: Arc<RldFeeEstimator>,
@@ -124,6 +124,13 @@ impl OnChainWallet {
         let rpc = self.fees.rpc.clone();
         let stop = self.stop.clone();
         let logger = self.logger.clone();
+        let network = self.network;
+
+        let sleep_timer = match network {
+            Network::Bitcoin | Network::Testnet | Network::Signet => Duration::from_secs(30),
+            Network::Regtest => Duration::from_secs(1),
+            _ => unreachable!("invalid network"),
+        };
 
         tokio::spawn(async move {
             loop {
@@ -193,14 +200,13 @@ impl OnChainWallet {
                         "Applied unconfirmed transactions in {}s",
                         start_apply_mempool.elapsed().as_secs_f32()
                     );
-                    break;
                 }
 
                 if blocks_received > 0 {
                     log_info!(logger, "Blocks received: {blocks_received}");
                 }
 
-                sleep(Duration::from_secs(30)).await;
+                sleep(sleep_timer).await;
             }
         });
     }

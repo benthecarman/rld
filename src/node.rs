@@ -27,8 +27,8 @@ use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId,
-    RecipientOnionFields, Retry,
+    ChainParameters, ChannelDetails, ChannelManager as LdkChannelManager, ChannelManagerReadArgs,
+    PaymentId, RecipientOnionFields, Retry,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
@@ -39,7 +39,7 @@ use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::router::{DefaultRouter, PaymentParameters, RouteParameters};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
-use lightning::sign::{EntropySource, InMemorySigner};
+use lightning::sign::{EntropySource, InMemorySigner, NodeSigner, Recipient};
 use lightning::util::config::{
     ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig,
 };
@@ -60,6 +60,7 @@ use lightning_invoice::utils::{
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -147,19 +148,84 @@ pub(crate) type BumpTxEventHandler = BumpTransactionEventHandler<
     Arc<RldLogger>,
 >;
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct PubkeyConnectionInfo {
+    pub pubkey: PublicKey,
+    pub socket_addr: SocketAddr,
+    pub original_connection_string: String,
+}
+
+impl PubkeyConnectionInfo {
+    pub fn new(connection: &str) -> anyhow::Result<Self> {
+        if connection.is_empty() {
+            return Err(anyhow!("connection is empty"));
+        };
+        let connection = connection.to_lowercase();
+        let (pubkey, peer_addr_str) = parse_peer_info(&connection)?;
+        Ok(Self {
+            pubkey,
+            socket_addr: SocketAddr::from_str(&peer_addr_str)
+                .map_err(|_| anyhow!("invalid peer address"))?,
+            original_connection_string: connection,
+        })
+    }
+}
+
+pub(crate) fn parse_peer_info(
+    peer_pubkey_and_ip_addr: &str,
+) -> anyhow::Result<(PublicKey, String)> {
+    let (pubkey, peer_addr_str) = split_peer_connection_string(peer_pubkey_and_ip_addr)?;
+
+    let peer_addr_str_with_port = if peer_addr_str.contains(':') {
+        peer_addr_str
+    } else {
+        format!("{peer_addr_str}:9735")
+    };
+
+    Ok((pubkey, peer_addr_str_with_port))
+}
+
+pub(crate) fn split_peer_connection_string(
+    peer_pubkey_and_ip_addr: &str,
+) -> anyhow::Result<(PublicKey, String)> {
+    let mut pubkey_and_addr = peer_pubkey_and_ip_addr.split('@');
+    let pubkey = pubkey_and_addr
+        .next()
+        .ok_or_else(|| anyhow!("pubkey is empty"))?;
+    let peer_addr_str = pubkey_and_addr
+        .next()
+        .ok_or_else(|| anyhow!("peer address is empty"))?;
+    let pubkey = PublicKey::from_str(pubkey).map_err(|_| anyhow!("invalid pubkey"))?;
+    Ok((pubkey, peer_addr_str.to_string()))
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct Balance {
+    pub confirmed: u64,
+    pub unconfirmed: u64,
+    pub lightning: u64,
+    pub force_close: u64,
+}
+
+impl Balance {
+    pub fn on_chain(&self) -> u64 {
+        self.confirmed + self.unconfirmed
+    }
+}
+
 #[derive(Clone)]
 pub struct Node {
     pub(crate) config: Config,
     pub(crate) peer_manager: Arc<PeerManager>,
     pub(crate) keys_manager: Arc<KeysManager>,
-    pub(crate) channel_manager: Arc<ChannelManager>,
+    pub channel_manager: Arc<ChannelManager>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
     pub(crate) network_graph: Arc<NetworkGraph>,
     pub(crate) fee_estimator: Arc<RldFeeEstimator>,
     pub(crate) router: Arc<Router>,
-    pub(crate) network: Network,
+    pub network: Network,
     pub(crate) persister: Arc<FilesystemStore>,
-    pub(crate) wallet: Arc<OnChainWallet>,
+    pub wallet: Arc<OnChainWallet>,
     pub(crate) bitcoind: Arc<bitcoincore_rpc::Client>,
     pub(crate) logger: Arc<RldLogger>,
     pub(crate) secp: Secp256k1<All>,
@@ -744,6 +810,40 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    pub fn node_id(&self) -> PublicKey {
+        self.keys_manager
+            .get_node_id(Recipient::Node)
+            .expect("invalid node id")
+    }
+
+    pub fn get_balance(&self) -> Balance {
+        let wallet_balance = self.wallet.balance();
+
+        let lightning_msats: u64 = self
+            .channel_manager
+            .list_channels()
+            .iter()
+            .map(|c| c.balance_msat)
+            .sum();
+
+        // get the amount in limbo from force closes
+        let channels = self.channel_manager.list_channels();
+        let ignored_channels: Vec<&ChannelDetails> = channels.iter().collect();
+        let force_close: u64 = self
+            .chain_monitor
+            .get_claimable_balances(&ignored_channels)
+            .iter()
+            .map(|bal| bal.claimable_amount_satoshis())
+            .sum();
+
+        Balance {
+            confirmed: wallet_balance.confirmed,
+            unconfirmed: wallet_balance.untrusted_pending + wallet_balance.trusted_pending,
+            lightning: lightning_msats / 1_000,
+            force_close,
+        }
     }
 
     pub fn create_invoice(

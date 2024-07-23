@@ -45,3 +45,9 @@ rcgen = "0.13.0"
 
 [build-dependencies]
 tonic-build = "0.11"
+
+[dev-dependencies]
+dotenv = "0.15.0"
+bitcoind = { version = "0.33.3", features = ["25_1"] }
+lazy_static = "1.4.0"
+lnd = { version = "0.1.4", git = "https://github.com/benthecarman/lnd-test-util.git", branch = "both", features = ["lnd_0_17_5"] }

@@ -48,6 +48,25 @@ pub struct Config {
     pub bitcoind_rpc_password: String,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            data_dir: ".".to_string(),
+            pg_url: String::new(),
+            port: 9735,
+            network: "signet".to_string(),
+            alias: None,
+            external_ip: None,
+            rpc_bind: "127.0.0.1".to_string(),
+            rpc_port: 9999,
+            bitcoind_host: "127.0.0.1".to_string(),
+            bitcoind_port: 38332,
+            bitcoind_rpc_user: "".to_string(),
+            bitcoind_rpc_password: "".to_string(),
+        }
+    }
+}
+
 impl Config {
     pub fn network(&self) -> bitcoin::Network {
         match self.network.as_str() {
