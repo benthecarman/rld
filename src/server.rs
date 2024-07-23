@@ -48,6 +48,7 @@ use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::{Message, PublicKey, ThirtyTwoByteHash};
 use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
+use bitcoincore_rpc::json::EstimateMode;
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
 use lightning::events::bump_transaction::WalletSource;
@@ -663,11 +664,7 @@ impl Lightning for Node {
         let resp = GetInfoResponse {
             version: "0.1.0".to_string(),
             commit_hash: "unknown".to_string(),
-            identity_pubkey: self
-                .keys_manager
-                .get_node_id(Recipient::Node)
-                .expect("this is safe")
-                .to_string(),
+            identity_pubkey: self.node_id().to_string(),
             alias: self.config.alias().to_string(),
             color: "#000000".to_string(),
             num_pending_channels: channels.iter().filter(|c| !c.is_channel_ready).count() as u32,
@@ -2469,9 +2466,15 @@ impl WalletKit for Node {
     ) -> Result<Response<crate::walletrpc::EstimateFeeResponse>, Status> {
         let req = request.into_inner();
 
+        let conf_target = if req.conf_target == 0 {
+            1_u16
+        } else {
+            req.conf_target as u16
+        };
+
         let res = self
             .bitcoind
-            .estimate_smart_fee(req.conf_target as u16, None)
+            .estimate_smart_fee(conf_target, Some(EstimateMode::Economical))
             .map_err(|e| Status::internal(e.to_string()))?;
 
         if let Some(per_kb) = res.fee_rate {

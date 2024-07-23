@@ -221,13 +221,12 @@ pub struct Node {
     pub channel_manager: Arc<ChannelManager>,
     pub(crate) chain_monitor: Arc<ChainMonitor>,
     pub(crate) network_graph: Arc<NetworkGraph>,
-    pub(crate) fee_estimator: Arc<RldFeeEstimator>,
     pub(crate) router: Arc<Router>,
     pub network: Network,
     pub(crate) persister: Arc<FilesystemStore>,
     pub wallet: Arc<OnChainWallet>,
     pub(crate) bitcoind: Arc<bitcoincore_rpc::Client>,
-    pub(crate) logger: Arc<RldLogger>,
+    pub logger: Arc<RldLogger>,
     pub(crate) secp: Secp256k1<All>,
     pub(crate) db_pool: Pool<ConnectionManager<PgConnection>>,
     pub(crate) stop_listen_connect: Arc<AtomicBool>,
@@ -236,6 +235,7 @@ pub struct Node {
 
     // broadcast channels
     pub(crate) invoice_broadcast: broadcast::Sender<Receive>,
+    #[allow(unused)]
     pub(crate) invoice_rx: Arc<broadcast::Receiver<Receive>>,
 }
 
@@ -565,7 +565,7 @@ impl Node {
         let event_handler = EventHandler {
             channel_manager: channel_manager.clone(),
             peer_manager: peer_manager.clone(),
-            fee_estimator: fee_estimator.clone(),
+            fee_estimator,
             wallet: wallet.clone(),
             keys_manager: keys_manager.clone(),
             bump_tx_event_handler,
@@ -754,7 +754,6 @@ impl Node {
             channel_manager,
             chain_monitor,
             network_graph,
-            fee_estimator,
             router,
             network,
             persister,

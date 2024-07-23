@@ -231,7 +231,7 @@ pub async fn fund_rld(rld: &Node) {
 
 pub async fn open_channel_from_rld(node: &Node, lnd: &mut Lnd) {
     // get some coins in the wallet
-    fund_rld(&node).await;
+    fund_rld(node).await;
     // make sure lnd is synced
     wait_for_lnd_sync(lnd).await;
 

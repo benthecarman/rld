@@ -1,11 +1,6 @@
 #![allow(clippy::enum_variant_names)]
 #![allow(clippy::large_enum_variant)]
 
-use crate::config::Config;
-use crate::lnrpc::lightning_server::LightningServer;
-use crate::logger::RldLogger;
-use crate::models::MIGRATIONS;
-use crate::node::Node;
 use bip39::Mnemonic;
 use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
 use bitcoin::secp256k1::rand::rngs::OsRng;
@@ -20,6 +15,11 @@ use lightning::util::logger::Logger;
 use lightning::{log_error, log_info};
 use macaroon::{ByteString, Format, Macaroon, MacaroonKey, Verifier};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
+use rld::config::Config;
+use rld::lnrpc::lightning_server::LightningServer;
+use rld::logger::RldLogger;
+use rld::models::MIGRATIONS;
+use rld::node::Node;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
@@ -33,17 +33,6 @@ use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic::{Request, Status};
-
-mod chain;
-mod config;
-mod events;
-mod fees;
-mod keys;
-mod logger;
-mod models;
-mod node;
-mod onchain;
-mod server;
 
 pub mod lnrpc {
     tonic::include_proto!("lnrpc");

@@ -191,7 +191,6 @@ async fn force_close_outbound_channel_from_lnd() {
     // force close the channel
     let channel = node.channel_manager.list_channels()[0]
         .funding_txo
-        .clone()
         .unwrap();
     let lightning = lnd.client.lightning();
     lightning
@@ -271,7 +270,6 @@ async fn force_close_inbound_channel_from_lnd() {
     // force close the channel
     let channel = node.channel_manager.list_channels()[0]
         .funding_txo
-        .clone()
         .unwrap();
     let lightning = lnd.client.lightning();
     lightning

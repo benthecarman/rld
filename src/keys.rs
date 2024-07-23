@@ -10,12 +10,14 @@ use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{Network, ScriptBuf, Transaction, TxOut};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
+use lightning::log_error;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::offers::invoice_request::UnsignedInvoiceRequest;
 use lightning::sign::{
     EntropySource, InMemorySigner, KeyMaterial, KeysManager as LdkKeysManager, NodeSigner,
     OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
+use lightning::util::logger::Logger;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -65,7 +67,7 @@ impl KeysManager {
             // addresses for no reason.
             wallet
                 .try_get_internal_address(AddressIndex::LastUnused)
-                .map_err(|_| ())?
+                .map_err(|e| log_error!(self.logger, "Error getting internal address: {e}"))?
                 .address
         };
 

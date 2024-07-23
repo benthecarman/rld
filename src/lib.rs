@@ -1,3 +1,6 @@
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::large_enum_variant)]
+
 pub mod chain;
 pub mod config;
 mod events;
