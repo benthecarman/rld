@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 #![allow(unused)]
 
+use crate::channel_acceptor::{ChannelAcceptor, ChannelAcceptorRequest, ChannelAcceptorResponse};
 use crate::invoicesrpc::invoices_server::Invoices;
 use crate::invoicesrpc::*;
 use crate::lnrpc::channel_point::FundingTxid;
@@ -53,6 +54,7 @@ use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
 use lightning::events::bump_transaction::WalletSource;
 use lightning::ln::channelmanager::{PaymentId, Retry};
+use lightning::ln::ChannelId;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{NodeSigner, Recipient};
 use lightning::util::ser::Writeable;
@@ -67,7 +69,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::time::sleep;
 use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
-use tonic::codegen::tokio_stream::Stream;
+use tonic::codegen::tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 #[tonic::async_trait]
@@ -1028,7 +1030,83 @@ impl Lightning for Node {
         &self,
         request: Request<Streaming<ChannelAcceptResponse>>,
     ) -> Result<Response<Self::ChannelAcceptorStream>, Status> {
-        Err(Status::unimplemented("channel_acceptor")) // todo
+        let mut req = request.into_inner();
+
+        let mut lock = self.channel_acceptor.write().await;
+
+        // check if channel_acceptor is already registered
+        if lock.is_some() {
+            return Err(Status::invalid_argument(
+                "channel_acceptor already registered",
+            ));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ChannelAcceptRequest, Status>>(128);
+
+        let (sender, mut resps) = tokio::sync::broadcast::channel::<ChannelAcceptorRequest>(100);
+        *lock = Some(ChannelAcceptor::new(sender));
+        drop(lock);
+
+        tokio::spawn(async move {
+            while let Ok(item) = resps.recv().await {
+                let i = ChannelAcceptRequest {
+                    node_pubkey: item.node_pubkey.encode(),
+                    chain_hash: item.chain_hash,
+                    pending_chan_id: item.pending_chan_id.encode(),
+                    funding_amt: item.funding_amt,
+                    push_amt: item.push_amt,
+                    dust_limit: item.dust_limit,
+                    max_value_in_flight: item.max_value_in_flight,
+                    channel_reserve: item.channel_reserve,
+                    min_htlc: item.min_htlc,
+                    fee_per_kw: item.fee_per_kw,
+                    csv_delay: item.csv_delay,
+                    max_accepted_htlcs: item.max_accepted_htlcs,
+                    channel_flags: item.channel_flags,
+                    commitment_type: item.commitment_type,
+                    wants_zero_conf: item.wants_zero_conf,
+                    wants_scid_alias: item.wants_scid_alias,
+                };
+                tx.send(Ok(i)).await.unwrap();
+            }
+        });
+
+        let lock = self.channel_acceptor.clone();
+        let network = self.network;
+        tokio::spawn(async move {
+            while let Ok(item) = req.message().await {
+                if let Some(item) = item {
+                    if let Some(channel_acceptor) = lock.read().await.as_ref() {
+                        let upfront_shutdown = if item.upfront_shutdown.is_empty() {
+                            None
+                        } else {
+                            // todo handle errors
+                            Address::from_str(&item.upfront_shutdown)
+                                .ok()
+                                .and_then(|a| a.require_network(network).ok())
+                        };
+
+                        // todo handle unwraps
+                        let resp = ChannelAcceptorResponse {
+                            accept: item.accept,
+                            pending_chan_id: ChannelId(item.pending_chan_id.try_into().unwrap()),
+                            error: item.error,
+                            upfront_shutdown,
+                            csv_delay: item.csv_delay,
+                            reserve_sat: item.reserve_sat,
+                            in_flight_max_msat: item.in_flight_max_msat,
+                            max_htlc_count: item.max_htlc_count,
+                            min_htlc_in: item.min_htlc_in,
+                            min_accept_depth: item.min_accept_depth,
+                            zero_conf: item.zero_conf,
+                        };
+                        let _ = channel_acceptor.send_response(resp).await;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     type CloseChannelStream = ReceiverStream<Result<CloseStatusUpdate, Status>>;

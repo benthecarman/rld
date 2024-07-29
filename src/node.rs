@@ -1,4 +1,5 @@
 use crate::chain::TxBroadcaster;
+use crate::channel_acceptor::ChannelAcceptor;
 use crate::config::Config;
 use crate::events::EventHandler;
 use crate::fees::RldFeeEstimator;
@@ -232,6 +233,7 @@ pub struct Node {
     pub(crate) stop_listen_connect: Arc<AtomicBool>,
     background_processor: tokio::sync::watch::Receiver<Result<(), std::io::Error>>,
     bp_exit: Arc<tokio::sync::watch::Sender<()>>,
+    pub(crate) channel_acceptor: Arc<tokio::sync::RwLock<Option<ChannelAcceptor>>>,
 
     // broadcast channels
     pub(crate) invoice_broadcast: broadcast::Sender<Receive>,
@@ -560,6 +562,7 @@ impl Node {
         ));
 
         let (invoice_broadcast, invoice_rx) = broadcast::channel(16);
+        let channel_acceptor = Arc::new(tokio::sync::RwLock::new(None));
 
         // Step 18: Handle LDK Events
         let event_handler = EventHandler {
@@ -572,6 +575,7 @@ impl Node {
             db_pool: db_pool.clone(),
             logger: logger.clone(),
             invoice_broadcast: invoice_broadcast.clone(),
+            channel_acceptor: channel_acceptor.clone(),
         };
         let event_handler_func = move |event: Event| {
             let ev = event_handler.clone();
@@ -767,6 +771,7 @@ impl Node {
             bp_exit: Arc::new(bp_exit),
             invoice_broadcast,
             invoice_rx: Arc::new(invoice_rx),
+            channel_acceptor,
         };
 
         Ok(node)

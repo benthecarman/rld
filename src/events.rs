@@ -1,3 +1,4 @@
+use crate::channel_acceptor::{ChannelAcceptor, ChannelAcceptorRequest};
 use crate::fees::RldFeeEstimator;
 use crate::keys::KeysManager;
 use crate::logger::RldLogger;
@@ -11,6 +12,7 @@ use crate::node::{BumpTxEventHandler, ChannelManager, Node, PeerManager};
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
 use bitcoin::absolute::LockTime;
+use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::Secp256k1;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::{Connection, PgConnection};
@@ -19,9 +21,11 @@ use lightning::ln::PaymentPreimage;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
-use lightning::{log_debug, log_error, log_info};
+use lightning::{log_debug, log_error, log_info, log_trace};
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
+use tokio::sync::broadcast::Sender;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct EventHandler {
@@ -35,7 +39,9 @@ pub struct EventHandler {
     pub logger: Arc<RldLogger>,
 
     // broadcast channels
-    pub invoice_broadcast: tokio::sync::broadcast::Sender<Receive>,
+    pub invoice_broadcast: Sender<Receive>,
+
+    pub channel_acceptor: Arc<RwLock<Option<ChannelAcceptor>>>,
 }
 
 impl EventHandler {
@@ -514,7 +520,84 @@ impl EventHandler {
                     "EVENT: OpenChannelRequest incoming: {counterparty_node_id}"
                 );
 
-                // todo channel acceptor
+                // todo get zero conf peers from config
+                let mut trust_zero_conf = false;
+
+                let lock = self.channel_acceptor.read().await;
+
+                match lock.as_ref() {
+                    None => log_trace!(
+                        self.logger,
+                        "No channel acceptor registered, auto accepting channel"
+                    ),
+                    Some(channel_acceptor) => {
+                        let chain_hash = ChainHash::using_genesis_block(self.wallet.network);
+
+                        let mut listener =
+                            channel_acceptor.add_listener(temporary_channel_id).await;
+
+                        let request = ChannelAcceptorRequest {
+                            node_pubkey: counterparty_node_id,
+                            chain_hash: chain_hash.encode(),
+                            pending_chan_id: temporary_channel_id,
+                            funding_amt: funding_satoshis,
+                            push_amt: push_msat,
+                            // todo https://github.com/lightningdevkit/rust-lightning/pull/3019
+                            dust_limit: 0,
+                            max_value_in_flight: 0,
+                            channel_reserve: 0,
+                            min_htlc: 0,
+                            fee_per_kw: 0,
+                            csv_delay: 0,
+                            max_accepted_htlcs: 0,
+                            channel_flags: 0,
+                            commitment_type: 0,
+                            wants_zero_conf: false,
+                            wants_scid_alias: false,
+                        };
+
+                        channel_acceptor.send_request(request)?;
+                        drop(lock);
+
+                        let msg = listener.recv().await;
+
+                        match msg {
+                            None => {
+                                log_error!(self.logger, "Channel acceptor timed out");
+                                if let Err(e) =
+                                    self.channel_manager.force_close_without_broadcasting_txn(
+                                        &temporary_channel_id,
+                                        &counterparty_node_id,
+                                    )
+                                {
+                                    log_error!(self.logger, "Error closing channel: {e:?}");
+                                }
+                                return Ok(());
+                            }
+                            Some(response) => {
+                                log_info!(self.logger, "Channel acceptor response: {response:?}");
+                                debug_assert_eq!(response.pending_chan_id, temporary_channel_id);
+
+                                if !response.accept {
+                                    log_info!(
+                                        self.logger,
+                                        "Channel acceptor declined channel, closing channel"
+                                    );
+                                    if let Err(e) =
+                                        self.channel_manager.force_close_without_broadcasting_txn(
+                                            &temporary_channel_id,
+                                            &counterparty_node_id,
+                                        )
+                                    {
+                                        log_error!(self.logger, "Error closing channel: {e:?}");
+                                    }
+                                }
+
+                                trust_zero_conf |= response.zero_conf;
+                            }
+                        }
+                    }
+                }
 
                 // save params to db
                 let mut conn = self.db_pool.get()?;
@@ -526,14 +609,23 @@ impl EventHandler {
                     false, // todo set private correctly
                     false,
                     funding_satoshis as i64,
-                    false, // todo set zero_conf correctly
+                    trust_zero_conf,
                 )?;
 
-                let result = self.channel_manager.accept_inbound_channel(
-                    &temporary_channel_id,
-                    &counterparty_node_id,
-                    params.id as u128,
-                );
+                let result = if trust_zero_conf {
+                    self.channel_manager
+                        .accept_inbound_channel_from_trusted_peer_0conf(
+                            &temporary_channel_id,
+                            &counterparty_node_id,
+                            params.id as u128,
+                        )
+                } else {
+                    self.channel_manager.accept_inbound_channel(
+                        &temporary_channel_id,
+                        &counterparty_node_id,
+                        params.id as u128,
+                    )
+                };
 
                 match result {
                     Ok(_) => log_debug!(self.logger, "EVENT: OpenChannelRequest accepted"),

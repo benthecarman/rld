@@ -2,6 +2,7 @@
 #![allow(clippy::large_enum_variant)]
 
 pub mod chain;
+mod channel_acceptor;
 pub mod config;
 mod events;
 mod fees;
