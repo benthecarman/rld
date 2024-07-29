@@ -14,17 +14,17 @@ pub mod onchain;
 mod server;
 
 pub mod lnrpc {
-	tonic::include_proto!("lnrpc");
+    tonic::include_proto!("lnrpc");
 }
 
 pub mod invoicesrpc {
-	tonic::include_proto!("invoicesrpc");
+    tonic::include_proto!("invoicesrpc");
 }
 
 pub mod signrpc {
-	tonic::include_proto!("signrpc");
+    tonic::include_proto!("signrpc");
 }
 
 pub mod walletrpc {
-	tonic::include_proto!("walletrpc");
+    tonic::include_proto!("walletrpc");
 }

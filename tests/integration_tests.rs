@@ -174,7 +174,10 @@ async fn force_close_inbound_channel_from_rld() {
     let final_balance = node.get_balance();
     assert_eq!(final_balance.lightning, 0);
     assert_eq!(final_balance.force_close, 0);
-    assert_eq!(final_balance.on_chain(), 97_550 + starting_balance.on_chain());
+    assert_eq!(
+        final_balance.on_chain(),
+        97_550 + starting_balance.on_chain()
+    );
 }
 
 /// Open a channel from rld to lnd and then have lnd force close it
@@ -189,9 +192,7 @@ async fn force_close_outbound_channel_from_lnd() {
     assert_eq!(starting_balance.lightning, 1_000_000);
 
     // force close the channel
-    let channel = node.channel_manager.list_channels()[0]
-        .funding_txo
-        .unwrap();
+    let channel = node.channel_manager.list_channels()[0].funding_txo.unwrap();
     let lightning = lnd.client.lightning();
     lightning
         .close_channel(CloseChannelRequest {
@@ -268,9 +269,7 @@ async fn force_close_inbound_channel_from_lnd() {
     assert_eq!(starting_balance.lightning, 100_000);
 
     // force close the channel
-    let channel = node.channel_manager.list_channels()[0]
-        .funding_txo
-        .unwrap();
+    let channel = node.channel_manager.list_channels()[0].funding_txo.unwrap();
     let lightning = lnd.client.lightning();
     lightning
         .close_channel(CloseChannelRequest {
