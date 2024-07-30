@@ -1,13 +1,13 @@
 use crate::logger::RldLogger;
 use crate::onchain::OnChainWallet;
-use bdk::wallet::AddressIndex;
+use bdk_wallet::KeychainKind;
 use bitcoin::absolute::LockTime;
-use bitcoin::bech32::u5;
-use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
+use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{Network, ScriptBuf, Transaction, TxOut};
+use lightning::bech32::u5;
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::log_error;
@@ -30,7 +30,7 @@ pub struct KeysManager {
 
 impl KeysManager {
     pub fn new(
-        xprv: ExtendedPrivKey,
+        xprv: Xpriv,
         network: Network,
         wallet: Arc<OnChainWallet>,
         logger: Arc<RldLogger>,
@@ -66,7 +66,7 @@ impl KeysManager {
             // These often fail because we continually retry these. Use LastUnused so we don't generate a ton of new
             // addresses for no reason.
             wallet
-                .try_get_internal_address(AddressIndex::LastUnused)
+                .next_unused_address(KeychainKind::Internal)
                 .map_err(|e| log_error!(self.logger, "Error getting internal address: {e}"))?
                 .address
         };
@@ -163,7 +163,7 @@ impl SignerProvider for KeysManager {
     fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
         let mut wallet = self.wallet.wallet.try_write().map_err(|_| ())?;
         Ok(wallet
-            .try_get_address(AddressIndex::New)
+            .next_unused_address(KeychainKind::External)
             .map_err(|_| ())?
             .address
             .script_pubkey())
@@ -172,7 +172,7 @@ impl SignerProvider for KeysManager {
     fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
         let mut wallet = self.wallet.wallet.try_write().map_err(|_| ())?;
         let script = wallet
-            .try_get_address(AddressIndex::New)
+            .next_unused_address(KeychainKind::External)
             .map_err(|_| ())?
             .address
             .script_pubkey();

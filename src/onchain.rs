@@ -2,24 +2,25 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::coin_type_from_network;
 use crate::logger::RldLogger;
 use anyhow::anyhow;
-use bdk::chain::indexed_tx_graph::Indexer;
-use bdk::chain::{BlockId, ChainOracle, ConfirmationTime};
-use bdk::psbt::PsbtUtils;
-use bdk::template::DescriptorTemplateOut;
-use bdk::wallet::{AddressIndex, AddressInfo, Balance};
-use bdk::{LocalOutput, SignOptions, Wallet};
 use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
+use bdk_wallet::chain::indexed_tx_graph::Indexer;
+use bdk_wallet::chain::{BlockId, ChainOracle, ConfirmationTime};
+use bdk_wallet::psbt::PsbtUtils;
+use bdk_wallet::template::DescriptorTemplateOut;
+use bdk_wallet::wallet::{AddressInfo, Balance};
+use bdk_wallet::{KeychainKind, LocalOutput, SignOptions, Wallet};
 use bitcoin::address::Payload;
-use bitcoin::bip32::{ChildNumber, DerivationPath, ExtendedPrivKey};
-use bitcoin::psbt::{PartiallySignedTransaction, Psbt};
-use bitcoin::{Address, FeeRate, Network, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
+use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
+use bitcoin::psbt::Psbt;
+use bitcoin::{Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
 use bitcoincore_rpc::RpcApi;
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::util::logger::Logger;
 use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::ops::RangeFull;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,15 +32,15 @@ use tokio::time::sleep;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TransactionDetails {
     /// Optional transaction
-    pub transaction: Transaction,
+    pub transaction: Arc<Transaction>,
     /// Transaction id
     pub txid: Txid,
     /// Received value (sats)
     /// Sum of owned outputs of this transaction.
-    pub received: u64,
+    pub received: Amount,
     /// Sent value (sats)
     /// Sum of owned inputs of this transaction.
-    pub sent: u64,
+    pub sent: Amount,
     /// Fee value in sats if it was available.
     pub fee: Option<u64>,
     /// Fee Rate if it was available.
@@ -72,14 +73,14 @@ pub struct OutputDetails {
     /// The output index used in the raw transaction
     pub output_index: usize,
     /// The value of the output coin in satoshis
-    pub amount: u64,
+    pub amount: Amount,
     /// Denotes if the output is controlled by the internal wallet
     pub is_our_address: bool,
 }
 
 #[derive(Clone)]
 pub struct OnChainWallet {
-    pub(crate) wallet: Arc<RwLock<Wallet<Store<bdk::wallet::ChangeSet>>>>,
+    pub(crate) wallet: Arc<RwLock<Wallet>>,
     pub network: Network,
     pub fees: Arc<RldFeeEstimator>,
     stop: Arc<AtomicBool>,
@@ -88,7 +89,7 @@ pub struct OnChainWallet {
 
 impl OnChainWallet {
     pub fn new(
-        xprv: ExtendedPrivKey,
+        xprv: Xpriv,
         network: Network,
         data_dir: &PathBuf,
         fees: Arc<RldFeeEstimator>,
@@ -285,14 +286,14 @@ impl OnChainWallet {
 
     pub fn get_new_address(&self) -> anyhow::Result<AddressInfo> {
         let mut wallet = self.wallet.write().unwrap();
-        let address = wallet.try_get_address(AddressIndex::New)?;
+        let address = wallet.next_unused_address(KeychainKind::External)?;
 
         Ok(address)
     }
 
     pub fn get_change_address(&self) -> anyhow::Result<AddressInfo> {
         let mut wallet = self.wallet.write().unwrap();
-        let address = wallet.try_get_internal_address(AddressIndex::New)?;
+        let address = wallet.next_unused_address(KeychainKind::Internal)?;
 
         Ok(address)
     }
@@ -315,7 +316,7 @@ impl OnChainWallet {
         spk: ScriptBuf,
         amount: u64,
         fee_rate: Option<FeeRate>,
-    ) -> anyhow::Result<PartiallySignedTransaction> {
+    ) -> anyhow::Result<Psbt> {
         let mut wallet = self.wallet.try_write().unwrap();
 
         let fee_rate = fee_rate.unwrap_or_else(|| {
@@ -325,7 +326,7 @@ impl OnChainWallet {
         let mut psbt = {
             let mut builder = wallet.build_tx();
             builder
-                .add_recipient(spk, amount)
+                .add_recipient(spk, bitcoin::Amount::from_sat(amount))
                 .enable_rbf()
                 .fee_rate(fee_rate);
             builder.finish()?
@@ -343,7 +344,7 @@ impl OnChainWallet {
     ) -> anyhow::Result<Txid> {
         let psbt = self.create_signed_psbt_to_spk(addr.script_pubkey(), amount, fee_rate)?;
 
-        let raw_transaction = psbt.extract_tx();
+        let raw_transaction = psbt.extract_tx()?;
         let txid = raw_transaction.txid();
 
         self.broadcast_transaction(raw_transaction)?;
@@ -355,7 +356,7 @@ impl OnChainWallet {
         &self,
         spk: ScriptBuf,
         fee_rate: Option<FeeRate>,
-    ) -> anyhow::Result<PartiallySignedTransaction> {
+    ) -> anyhow::Result<Psbt> {
         let mut wallet = self.wallet.try_write().unwrap();
 
         let fee_rate = fee_rate.unwrap_or_else(|| {
@@ -380,7 +381,7 @@ impl OnChainWallet {
     pub fn sweep(&self, addr: Address, fee_rate: Option<FeeRate>) -> anyhow::Result<Txid> {
         let psbt = self.create_sweep_psbt(addr.script_pubkey(), fee_rate)?;
 
-        let raw_transaction = psbt.extract_tx();
+        let raw_transaction = psbt.extract_tx()?;
         let txid = raw_transaction.txid();
 
         self.broadcast_transaction(raw_transaction)?;
@@ -392,7 +393,7 @@ impl OnChainWallet {
         &self,
         outputs: Vec<TxOut>,
         fee_rate: Option<FeeRate>,
-    ) -> anyhow::Result<PartiallySignedTransaction> {
+    ) -> anyhow::Result<Psbt> {
         if outputs.is_empty() {
             return Err(anyhow!("No outputs provided"));
         }
@@ -435,7 +436,7 @@ impl OnChainWallet {
             wallet.sign(&mut psbt, SignOptions::default())?;
         }
 
-        let raw_transaction = psbt.extract_tx();
+        let raw_transaction = psbt.extract_tx()?;
         let txid = raw_transaction.txid();
 
         self.broadcast_transaction(raw_transaction)?;
@@ -461,11 +462,13 @@ impl OnChainWallet {
                 .transactions()
                 .filter_map(|tx| {
                     // skip txs that were not relevant to our bdk wallet
-                    if wallet.spk_index().is_tx_relevant(tx.tx_node.tx) {
-                        let (sent, received) = wallet.spk_index().sent_and_received(tx.tx_node.tx);
+                    if wallet.spk_index().is_tx_relevant(&tx.tx_node.tx) {
+                        let (sent, received) = wallet
+                            .spk_index()
+                            .sent_and_received(&tx.tx_node.tx, RangeFull);
 
-                        let fee = wallet.calculate_fee(tx.tx_node.tx).ok();
-                        let fee_rate = wallet.calculate_fee_rate(tx.tx_node.tx).ok();
+                        let fee = wallet.calculate_fee(&tx.tx_node.tx).ok();
+                        let fee_rate = wallet.calculate_fee_rate(&tx.tx_node.tx).ok();
 
                         let output_details = tx
                             .tx_node
@@ -539,9 +542,9 @@ impl OnChainWallet {
                     .map(|o| o.outpoint)
                     .collect::<HashSet<OutPoint>>();
 
-                let (sent, received) = wallet.sent_and_received(tx.tx_node.tx);
-                let fee = wallet.calculate_fee(tx.tx_node.tx).ok();
-                let fee_rate = wallet.calculate_fee_rate(tx.tx_node.tx).ok();
+                let (sent, received) = wallet.sent_and_received(&tx.tx_node.tx);
+                let fee = wallet.calculate_fee(&tx.tx_node.tx).ok();
+                let fee_rate = wallet.calculate_fee_rate(&tx.tx_node.tx).ok();
                 let output_details = tx
                     .tx_node
                     .tx
@@ -608,13 +611,12 @@ impl WalletSource for OnChainWallet {
     fn get_change_script(&self) -> Result<ScriptBuf, ()> {
         let mut wallet = self.wallet.try_write().map_err(|_| ())?;
         let addr = wallet
-            .try_get_internal_address(AddressIndex::New)
-            .map_err(|_| ())?
-            .address;
+            .next_unused_address(KeychainKind::Internal)
+            .map_err(|_| ())?;
         Ok(addr.script_pubkey())
     }
 
-    fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
+    fn sign_psbt(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
         let wallet = self.wallet.try_read().map_err(|e| {
             log_error!(
                 self.logger,
@@ -631,12 +633,13 @@ impl WalletSource for OnChainWallet {
             .sign(&mut psbt, sign_options)
             .map_err(|e| log_error!(self.logger, "Could not sign transaction: {e:?}"))?;
 
-        Ok(psbt.extract_tx())
+        psbt.extract_tx()
+            .map_err(|e| log_error!(self.logger, "Could not extract tx: {e:?}"))
     }
 }
 
 fn get_tr_descriptors_for_extended_key(
-    xprv: ExtendedPrivKey,
+    xprv: Xpriv,
     network: Network,
 ) -> anyhow::Result<(DescriptorTemplateOut, DescriptorTemplateOut)> {
     let coin_type = coin_type_from_network(network);
@@ -647,11 +650,11 @@ fn get_tr_descriptors_for_extended_key(
         ChildNumber::from_hardened_idx(0)?, // account number
     ]);
 
-    let receive_descriptor_template = bdk::descriptor!(tr((
+    let receive_descriptor_template = bdk_wallet::descriptor!(tr((
         xprv,
         derivation_path.extend([ChildNumber::Normal { index: 0 }])
     )))?;
-    let change_descriptor_template = bdk::descriptor!(tr((
+    let change_descriptor_template = bdk_wallet::descriptor!(tr((
         xprv,
         derivation_path.extend([ChildNumber::Normal { index: 1 }])
     )))?;

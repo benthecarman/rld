@@ -16,7 +16,7 @@ use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::Secp256k1;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::{Connection, PgConnection};
-use lightning::events::{ClosureReason, Event, PaymentPurpose};
+use lightning::events::{ClosureReason, Event, PaymentPurpose, ReplayEvent};
 use lightning::ln::PaymentPreimage;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
@@ -45,9 +45,13 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    pub async fn handle_event(&self, event: Event) {
-        if let Err(e) = self.handle_event_internal(event).await {
-            log_error!(self.logger, "Error handling event: {e:?}");
+    pub async fn handle_event(&self, event: Event) -> Result<(), ReplayEvent> {
+        match self.handle_event_internal(event).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                log_error!(self.logger, "Error handling event: {e:?}");
+                Err(ReplayEvent())
+            }
         }
     }
 
@@ -91,6 +95,7 @@ impl EventHandler {
                         let _ = self.channel_manager.force_close_without_broadcasting_txn(
                             &temporary_channel_id,
                             &counterparty_node_id,
+                            "Could not create signed PSBT for channel".to_string(),
                         );
                         return Err(anyhow!(format!(
                             "Could not create signed PSBT for channel {user_channel_id}: {e:?}"
@@ -98,7 +103,7 @@ impl EventHandler {
                     }
                 };
 
-                let tx = psbt.extract_tx();
+                let tx = psbt.extract_tx()?;
                 params.set_opening_tx(&tx);
 
                 if let Err(e) = self.channel_manager.funding_transaction_generated(
@@ -119,6 +124,11 @@ impl EventHandler {
                 params.save(&mut conn)?;
 
                 log_info!(self.logger, "EVENT: FundingGenerationReady success");
+                Ok(())
+            }
+            Event::FundingTxBroadcastSafe { .. } => {
+                // we should never get this event
+                log_debug!(self.logger, "EVENT: FundingTxBroadcastSafe");
                 Ok(())
             }
             Event::PaymentClaimable {
@@ -168,6 +178,7 @@ impl EventHandler {
                 purpose,
                 htlcs,
                 sender_intended_total_msat: _,
+                onion_fields: _, // todo
             } => {
                 log_debug!(
                     self.logger,
@@ -568,6 +579,7 @@ impl EventHandler {
                                     self.channel_manager.force_close_without_broadcasting_txn(
                                         &temporary_channel_id,
                                         &counterparty_node_id,
+                                        "Channel acceptor timed out".to_string(),
                                     )
                                 {
                                     log_error!(self.logger, "Error closing channel: {e:?}");
@@ -579,14 +591,22 @@ impl EventHandler {
                                 debug_assert_eq!(response.pending_chan_id, temporary_channel_id);
 
                                 if !response.accept {
+                                    let reason = if response.error.is_empty() {
+                                        "Channel acceptor declined channel, closing channel"
+                                            .to_string()
+                                    } else {
+                                        response.error
+                                    };
+
                                     log_info!(
                                         self.logger,
-                                        "Channel acceptor declined channel, closing channel"
+                                        "Channel acceptor declined channel, closing channel for reason: {reason}"
                                     );
                                     if let Err(e) =
                                         self.channel_manager.force_close_without_broadcasting_txn(
                                             &temporary_channel_id,
                                             &counterparty_node_id,
+                                            reason,
                                         )
                                     {
                                         log_error!(self.logger, "Error closing channel: {e:?}");
@@ -638,6 +658,26 @@ impl EventHandler {
             Event::BumpTransaction(event) => {
                 log_debug!(self.logger, "EVENT: BumpTransaction: {event:?}");
                 self.bump_tx_event_handler.handle_event(&event);
+                Ok(())
+            }
+            Event::InvoiceReceived {
+                payment_id,
+                invoice,
+                context,
+                responder,
+            } => {
+                log_debug!(self.logger, "EVENT: InvoiceReceived, payment_id: {payment_id:?}, invoice: {invoice:?}, context: {context:?}, responder: {responder:?}");
+                self.channel_manager
+                    .send_payment_for_bolt12_invoice(&invoice, &context)
+                    .map_err(|e| anyhow!("ERROR: Failed to send payment for invoice: {e:?}"))?;
+                Ok(())
+            }
+            Event::OnionMessageIntercepted { .. } => {
+                log_debug!(self.logger, "EVENT: OnionMessageIntercepted");
+                Ok(())
+            }
+            Event::OnionMessagePeerConnected { .. } => {
+                log_debug!(self.logger, "EVENT: OnionMessagePeerConnected");
                 Ok(())
             }
         }

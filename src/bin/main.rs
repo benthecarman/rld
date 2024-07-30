@@ -2,7 +2,7 @@
 #![allow(clippy::large_enum_variant)]
 
 use bip39::Mnemonic;
-use bitcoin::bip32::{DerivationPath, ExtendedPrivKey};
+use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::secp256k1::Secp256k1;
@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
     let network = config.network();
     let keys = KeysFile::read(&path.join("keys.json"), network, &logger)?;
     let seed = keys.seed.to_seed_normalized("");
-    let xpriv = ExtendedPrivKey::new_master(config.network(), &seed)?;
+    let xpriv = Xpriv::new_master(config.network(), &seed)?;
 
     let derv_path = match network {
         Network::Bitcoin => DerivationPath::from_str("m/1039h/0h/0h/0/0")?,

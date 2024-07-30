@@ -14,7 +14,7 @@ use crate::models::receive::Receive;
 use crate::models::CreatedInvoice;
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
-use bitcoin::bip32::ExtendedPrivKey;
+use bitcoin::bip32::Xpriv;
 use bitcoin::hashes::{sha256::Hash as Sha256Hash, Hash};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
@@ -27,9 +27,10 @@ use lightning::blinded_path::EmptyNodeIdLookUp;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
+use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelDetails, ChannelManager as LdkChannelManager, ChannelManagerReadArgs,
-    PaymentId, RecipientOnionFields, Retry,
+    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId,
+    RecipientOnionFields, Retry,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
@@ -101,6 +102,7 @@ type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
     Arc<EmptyNodeIdLookUp>,
     Arc<DefaultMessageRouter<Arc<NetworkGraph>, Arc<RldLogger>, Arc<KeysManager>>>,
     Arc<ChannelManager>,
+    IgnoringMessageHandler,
     IgnoringMessageHandler,
 >;
 
@@ -244,7 +246,7 @@ pub struct Node {
 impl Node {
     pub async fn new(
         config: Config,
-        xpriv: ExtendedPrivKey,
+        xpriv: Xpriv,
         db_pool: Pool<ConnectionManager<PgConnection>>,
         logger: Arc<RldLogger>,
         stop: Arc<AtomicBool>,
@@ -263,7 +265,7 @@ impl Node {
 
         let network = config.network();
         let blockchain_info = bitcoind.get_blockchain_info()?;
-        if blockchain_info.chain != network.to_core_arg() {
+        if blockchain_info.chain != network {
             anyhow::bail!("Network mismatch");
         }
 
@@ -481,6 +483,7 @@ impl Node {
             )),
             Arc::clone(&channel_manager),
             IgnoringMessageHandler {},
+            IgnoringMessageHandler {},
         ));
         let mut ephemeral_bytes = [0; 32];
         let current_time = SystemTime::now()
@@ -579,9 +582,7 @@ impl Node {
         };
         let event_handler_func = move |event: Event| {
             let ev = event_handler.clone();
-            async move {
-                ev.handle_event(event).await;
-            }
+            async move { ev.handle_event(event).await }
         };
 
         // Step 19: Persist ChannelManager and NetworkGraph
@@ -602,6 +603,7 @@ impl Node {
                 event_handler_func,
                 bp_chain_monitor,
                 bp_channel_manager,
+                Some(onion_messenger),
                 GossipSync::p2p(bp_gossip_sync),
                 bp_peer_manager,
                 bp_logger.clone(),
@@ -689,7 +691,7 @@ impl Node {
                             .read_only()
                             .node(&peer.into())
                             .and_then(|n| n.announcement_info.clone())
-                            .and_then(|a| a.announcement_message)
+                            .and_then(|a| a.announcement_message().cloned())
                             .map(|a| a.contents.addresses)
                             .map(|a| {
                                 a.iter()
@@ -843,8 +845,9 @@ impl Node {
             .sum();
 
         Balance {
-            confirmed: wallet_balance.confirmed,
-            unconfirmed: wallet_balance.untrusted_pending + wallet_balance.trusted_pending,
+            confirmed: wallet_balance.confirmed.to_sat(),
+            unconfirmed: (wallet_balance.untrusted_pending + wallet_balance.trusted_pending)
+                .to_sat(),
             lightning: lightning_msats / 1_000,
             force_close,
         }

@@ -4,7 +4,7 @@ use crate::test_utils::{
 };
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use lnd::tonic_lnd::lnrpc::channel_point::FundingTxid;
-use lnd::tonic_lnd::lnrpc::{ChannelPoint, CloseChannelRequest, InvoiceRequest, SendRequest};
+use lnd::tonic_lnd::lnrpc::{ChannelPoint, CloseChannelRequest, Invoice, SendRequest};
 use rld::models::payment::PaymentStatus;
 use std::str::FromStr;
 use std::time::Duration;
@@ -40,12 +40,13 @@ async fn test_pay_invoice() {
 
     let lightning = lnd.client.lightning();
     let resp = lightning
-        .add_invoice(InvoiceRequest {
+        .add_invoice(Invoice {
             memo: "".to_string(),
             value_msat: 10_000_000, // 10k sats
             private: false,
             is_keysend: false,
             is_amp: false,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -74,7 +75,11 @@ async fn force_close_outbound_channel_from_rld() {
 
     let channel = node.channel_manager.list_channels()[0].clone();
     node.channel_manager
-        .force_close_broadcasting_latest_txn(&channel.channel_id, &channel.counterparty.node_id)
+        .force_close_broadcasting_latest_txn(
+            &channel.channel_id,
+            &channel.counterparty.node_id,
+            "error".to_string(),
+        )
         .unwrap();
 
     let new_balance = node.get_balance();
@@ -141,7 +146,11 @@ async fn force_close_inbound_channel_from_rld() {
 
     let channel = node.channel_manager.list_channels()[0].clone();
     node.channel_manager
-        .force_close_broadcasting_latest_txn(&channel.channel_id, &channel.counterparty.node_id)
+        .force_close_broadcasting_latest_txn(
+            &channel.channel_id,
+            &channel.counterparty.node_id,
+            "error".to_string(),
+        )
         .unwrap();
 
     let new_balance = node.get_balance();

@@ -39,8 +39,8 @@ use crate::walletrpc::{
     SignMessageWithAddrResponse, SignPsbtRequest, SignPsbtResponse, VerifyMessageWithAddrRequest,
     VerifyMessageWithAddrResponse,
 };
-use bdk::chain::ConfirmationTime;
-use bdk::miniscript::psbt::PsbtExt;
+use bdk_wallet::chain::ConfirmationTime;
+use bdk_wallet::miniscript::psbt::PsbtExt;
 use bitcoin::address::Payload;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::ecdsa::Signature;
@@ -81,17 +81,17 @@ impl Lightning for Node {
         let balance = self.wallet.balance();
 
         let account = WalletAccountBalance {
-            confirmed_balance: balance.trusted_spendable() as i64,
-            unconfirmed_balance: balance.untrusted_pending as i64,
+            confirmed_balance: balance.trusted_spendable().to_sat() as i64,
+            unconfirmed_balance: balance.untrusted_pending.to_sat() as i64,
         };
 
         let mut account_balance = HashMap::with_capacity(1);
         account_balance.insert("default".to_string(), account);
 
         let response = WalletBalanceResponse {
-            total_balance: balance.total() as i64,
-            confirmed_balance: balance.trusted_spendable() as i64,
-            unconfirmed_balance: balance.untrusted_pending as i64,
+            total_balance: balance.total().to_sat() as i64,
+            confirmed_balance: balance.trusted_spendable().to_sat() as i64,
+            unconfirmed_balance: balance.untrusted_pending.to_sat() as i64,
             locked_balance: 0,
             reserved_balance_anchor_chan: 0,
             account_balance,
@@ -232,7 +232,7 @@ impl Lightning for Node {
                             address: o.address.clone().unwrap_or_default(),
                             pk_script: o.spk.to_hex_string(),
                             output_index: o.output_index as i64,
-                            amount: o.amount as i64,
+                            amount: o.amount.to_sat() as i64,
                             is_our_address: o.is_our_address,
                         }
                     })
@@ -249,7 +249,7 @@ impl Lightning for Node {
 
                 Some(Transaction {
                     tx_hash: t.txid.to_string(),
-                    amount: (t.received - t.sent) as i64,
+                    amount: (t.received - t.sent).to_sat() as i64,
                     num_confirmations: current_height as i32 - block_height + 1,
                     block_hash,
                     block_height,
@@ -288,8 +288,8 @@ impl Lightning for Node {
                     Address::from_str(&addr)
                         .map_err(|e| Status::invalid_argument(format!("{:?}", e)))
                         .map(|a| TxOut {
-                            script_pubkey: a.payload.script_pubkey(),
-                            value: amt as u64,
+                            script_pubkey: a.payload().script_pubkey(),
+                            value: bitcoin::Amount::from_sat(amt as u64),
                         })
                 })
                 .collect::<Result<Vec<TxOut>, Status>>()?;
@@ -422,7 +422,7 @@ impl Lightning for Node {
                     Some(Utxo {
                         address_type: address_type.into(),
                         address,
-                        amount_sat: u.txout.value as i64,
+                        amount_sat: u.txout.value.to_sat() as i64,
                         pk_script: u.txout.script_pubkey.to_hex_string(),
                         outpoint: Some(OutPoint {
                             txid_bytes: u.outpoint.txid.encode(),
@@ -496,8 +496,8 @@ impl Lightning for Node {
                 Address::from_str(&addr)
                     .map_err(|e| Status::invalid_argument(format!("{:?}", e)))
                     .map(|a| TxOut {
-                        script_pubkey: a.payload.script_pubkey(),
-                        value: amt as u64,
+                        script_pubkey: a.payload().script_pubkey(),
+                        value: bitcoin::Amount::from_sat(amt as u64),
                     })
             })
             .collect::<Result<Vec<TxOut>, Status>>()?;
@@ -537,8 +537,7 @@ impl Lightning for Node {
         let signature = lightning::util::message_signing::sign(
             &req.msg,
             &self.keys_manager.get_node_secret_key(),
-        )
-        .map_err(|e| Status::internal(e.to_string()))?;
+        );
         let response = SignMessageResponse { signature };
         Ok(Response::new(response))
     }
@@ -1148,8 +1147,11 @@ impl Lightning for Node {
             .ok_or(Status::invalid_argument("Channel not found"))?;
 
         let res = if req.force {
-            self.channel_manager
-                .force_close_broadcasting_latest_txn(&chan.channel_id, &chan.counterparty.node_id)
+            self.channel_manager.force_close_broadcasting_latest_txn(
+                &chan.channel_id,
+                &chan.counterparty.node_id,
+                "User forced closed channel.".to_string(),
+            )
         } else if req.delivery_address.is_empty() {
             self.channel_manager
                 .close_channel(&chan.channel_id, &chan.counterparty.node_id)
@@ -1159,7 +1161,7 @@ impl Lightning for Node {
                 .require_network(self.network)
                 .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
             let script = address
-                .payload
+                .payload()
                 .script_pubkey()
                 .try_into()
                 .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
@@ -2336,7 +2338,7 @@ impl WalletKit for Node {
                     Some(Utxo {
                         address_type: address_type.into(),
                         address,
-                        amount_sat: u.txout.value as i64,
+                        amount_sat: u.txout.value.to_sat() as i64,
                         pk_script: u.txout.script_pubkey.to_hex_string(),
                         outpoint: Some(OutPoint {
                             txid_bytes: u.outpoint.txid.encode(),
@@ -2514,7 +2516,7 @@ impl WalletKit for Node {
             .outputs
             .into_iter()
             .map(|o| TxOut {
-                value: o.value as u64,
+                value: bitcoin::Amount::from_sat(o.value as u64),
                 script_pubkey: ScriptBuf::from(o.pk_script.to_vec()),
             })
             .collect();

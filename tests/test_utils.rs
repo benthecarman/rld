@@ -1,4 +1,4 @@
-use bitcoin::bip32::ExtendedPrivKey;
+use bitcoin::bip32::Xpriv;
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::{Address, Amount, Network};
@@ -74,7 +74,7 @@ pub async fn create_rld() -> Node {
     let mut seed = [0; 32];
     OsRng.fill_bytes(&mut seed);
     let network = Network::Regtest;
-    let xpriv = ExtendedPrivKey::new_master(network, &seed).unwrap();
+    let xpriv = Xpriv::new_master(network, &seed).unwrap();
 
     let config = Config {
         data_dir: tempdir().unwrap().into_path().to_str().unwrap().to_string(),
@@ -131,7 +131,11 @@ pub async fn create_lnd() -> Lnd {
         .expect("you need to provide env var LND_EXE or specify an lnd version feature");
     let mut config = LndConf::default();
     config.view_stdout = false;
-    let mut lnd = Lnd::with_conf(lnd_exe, &config, &BITCOIND).await.unwrap();
+    let rpc_cookie = BITCOIND.params.cookie_file.to_str().unwrap().to_string();
+    let rpc_host = BITCOIND.params.rpc_socket.to_string();
+    let mut lnd = Lnd::with_conf(lnd_exe, &config, rpc_cookie, rpc_host, &BITCOIND)
+        .await
+        .unwrap();
     let lightning = lnd.client.lightning();
 
     let lnd_address = lightning
@@ -211,7 +215,7 @@ pub async fn fund_rld(rld: &Node) {
     BITCOIND
         .client
         .send_to_address(
-            &address,
+            &address.address,
             Amount::from_sat(100_000_000),
             None,
             None,
@@ -226,7 +230,7 @@ pub async fn fund_rld(rld: &Node) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let balance = rld.wallet.balance();
-    assert_eq!(balance.confirmed, 100_000_000);
+    assert_eq!(balance.confirmed.to_sat(), 100_000_000);
 }
 
 pub async fn open_channel_from_rld(node: &Node, lnd: &mut Lnd) {
