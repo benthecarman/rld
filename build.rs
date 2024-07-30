@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         "lightning.proto",
         "invoicesrpc/invoices.proto",
+        "lndkrpc/lndkrpc.proto",
         "signrpc/signer.proto",
         "walletrpc/walletkit.proto",
     ];

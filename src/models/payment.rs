@@ -1,8 +1,9 @@
 use super::schema::payments;
 use bitcoin::secp256k1::PublicKey;
 use diesel::prelude::*;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::PaymentHash;
-use lightning::offers::offer::Offer;
+use lightning::offers::invoice::Bolt12Invoice;
 use lightning::routing::router::{BlindedTail, Path, RouteHop};
 use lightning::util::ser::{Readable, Writeable};
 use lightning_invoice::Bolt11Invoice;
@@ -32,13 +33,14 @@ pub enum PaymentStatus {
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Payment {
     pub id: i32,
+    pub(crate) payment_id: Vec<u8>,
     pub(crate) payment_hash: Vec<u8>,
     preimage: Option<Vec<u8>>,
     pub amount_msats: i64,
     pub fee_msats: Option<i64>,
     destination_pubkey: Option<Vec<u8>>,
     bolt11: Option<String>,
-    bolt12: Option<String>,
+    bolt12: Option<Vec<u8>>,
     status: i16,
     path: Option<Vec<u8>>,
     blinded_tail: Option<Vec<u8>>,
@@ -49,11 +51,12 @@ pub struct Payment {
 #[derive(Insertable, AsChangeset)]
 #[diesel(table_name = payments)]
 struct NewPayment {
+    payment_id: Vec<u8>,
     payment_hash: Vec<u8>,
     amount_msats: i64,
     destination_pubkey: Option<Vec<u8>>,
     bolt11: Option<String>,
-    bolt12: Option<String>,
+    bolt12: Option<Vec<u8>>,
     status: i16,
 }
 
@@ -101,10 +104,10 @@ impl Payment {
             .map(|b| Bolt11Invoice::from_str(b).expect("invalid bolt11"))
     }
 
-    pub fn bolt12(&self) -> Option<Offer> {
+    pub fn bolt12(&self) -> Option<Bolt12Invoice> {
         self.bolt12
-            .as_ref()
-            .map(|b| Offer::from_str(b).expect("invalid bolt12"))
+            .clone()
+            .map(|b| Bolt12Invoice::try_from(b).expect("invalid bolt12"))
     }
 
     pub fn status(&self) -> PaymentStatus {
@@ -134,7 +137,17 @@ impl Payment {
         })
     }
 
-    pub fn find(
+    pub fn find_by_payment_id(
+        conn: &mut PgConnection,
+        payment_id: PaymentId,
+    ) -> anyhow::Result<Option<Payment>> {
+        Ok(payments::table
+            .filter(payments::payment_id.eq(payment_id.0.as_slice()))
+            .get_result(conn)
+            .optional()?)
+    }
+
+    pub fn find_by_payment_hash(
         conn: &mut PgConnection,
         payment_hash: [u8; 32],
     ) -> anyhow::Result<Option<Payment>> {
@@ -146,18 +159,20 @@ impl Payment {
 
     pub fn create(
         conn: &mut PgConnection,
+        payment_id: PaymentId,
         payment_hash: PaymentHash,
         amount_msats: i64,
         destination_pubkey: Option<PublicKey>,
         bolt11: Option<Bolt11Invoice>,
-        bolt12: Option<Offer>,
+        bolt12: Option<&Bolt12Invoice>,
     ) -> anyhow::Result<Payment> {
         let new = NewPayment {
+            payment_id: payment_id.0.to_vec(),
             payment_hash: payment_hash.0.to_vec(),
             amount_msats,
             destination_pubkey: destination_pubkey.map(|d| d.serialize().to_vec()),
             bolt11: bolt11.map(|b| b.to_string()),
-            bolt12: bolt12.map(|b| b.to_string()),
+            bolt12: bolt12.map(|b| b.encode()),
             status: PaymentStatus::Pending as i16,
         };
 

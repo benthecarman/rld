@@ -15,6 +15,7 @@ use crate::models::CreatedInvoice;
 use crate::onchain::OnChainWallet;
 use anyhow::anyhow;
 use bitcoin::bip32::Xpriv;
+use bitcoin::constants::ChainHash;
 use bitcoin::hashes::{sha256::Hash as Sha256Hash, Hash};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
@@ -36,6 +37,7 @@ use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
 };
 use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::offers::offer::{Amount, Offer};
 use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
 use lightning::routing::gossip::P2PGossipSync;
@@ -218,7 +220,7 @@ impl Balance {
 
 #[derive(Clone)]
 pub struct Node {
-    pub(crate) config: Config,
+    pub config: Config,
     pub(crate) peer_manager: Arc<PeerManager>,
     pub(crate) keys_manager: Arc<KeysManager>,
     pub channel_manager: Arc<ChannelManager>,
@@ -853,6 +855,12 @@ impl Node {
         }
     }
 
+    pub fn list_receives(&self) -> anyhow::Result<Vec<Receive>> {
+        let mut conn = self.db_pool.get()?;
+        let recvs = Receive::find_all(&mut conn)?;
+        Ok(recvs)
+    }
+
     pub fn create_invoice(
         &self,
         description: Bolt11InvoiceDescription,
@@ -898,10 +906,30 @@ impl Node {
         })
     }
 
+    pub async fn create_offer(&self, amount_msats: Option<u64>) -> anyhow::Result<Offer> {
+        let builder = self
+            .channel_manager
+            .create_offer_builder(None)
+            .map_err(|e| anyhow!("Failed to create offer: {e:?}"))?;
+
+        let builder = if let Some(amt) = amount_msats {
+            builder.amount_msats(amt)
+        } else {
+            builder
+        };
+
+        let offer = builder
+            .build()
+            .map_err(|e| anyhow!("Failed to create offer: {e:?}"))?;
+
+        // todo: currently not persisting offer
+
+        Ok(offer)
+    }
+
     pub(crate) async fn await_payment(
         &self,
         payment_id: PaymentId,
-        payment_hash: PaymentHash,
         timeout: u64,
     ) -> anyhow::Result<Payment> {
         let start = Instant::now();
@@ -915,7 +943,7 @@ impl Node {
 
             let payment_info = {
                 let mut conn = self.db_pool.get()?;
-                Payment::find(&mut conn, payment_hash.0)?
+                Payment::find_by_payment_id(&mut conn, payment_id)?
             };
 
             if let Some(info) = payment_info {
@@ -965,6 +993,7 @@ impl Node {
         let pk = invoice.get_payee_pub_key();
         Payment::create(
             &mut conn,
+            payment_id,
             hash,
             amount_msats as i64,
             Some(pk),
@@ -982,10 +1011,63 @@ impl Node {
         timeout_secs: Option<u64>,
     ) -> anyhow::Result<Payment> {
         // initiate payment
-        let (payment_id, payment_hash) = self.init_pay_invoice(invoice, amt_sats).await?;
+        let (payment_id, _) = self.init_pay_invoice(invoice, amt_sats).await?;
         let timeout: u64 = timeout_secs.unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
 
-        self.await_payment(payment_id, payment_hash, timeout).await
+        self.await_payment(payment_id, timeout).await
+    }
+
+    pub async fn init_pay_offer(
+        &self,
+        offer: Offer,
+        amount_msats: Option<u64>,
+    ) -> anyhow::Result<PaymentId> {
+        if !offer.supports_chain(ChainHash::using_genesis_block(self.network)) {
+            anyhow::bail!("Network mismatch");
+        }
+
+        // todo: support quantity
+        if offer.expects_quantity() {
+            return Err(anyhow!("Offer expects quantity, currently not supported"));
+        }
+
+        let amount = match (amount_msats, offer.amount()) {
+            (Some(_), Some(_)) => return Err(anyhow!("Two amounts provided")),
+            (Some(amt), None) => amt,
+            (None, Some(Amount::Bitcoin { amount_msats })) => amount_msats,
+            (None, Some(Amount::Currency { .. })) => {
+                return Err(anyhow!("Currency amount not supported"))
+            }
+            (None, None) => return Err(anyhow!("No amount provided")),
+        };
+
+        let payment_id = PaymentId(offer.id().0);
+        self.channel_manager
+            .pay_for_offer(
+                &offer,
+                None,
+                Some(amount),
+                None,
+                payment_id,
+                Retry::Timeout(Duration::from_secs(30)),
+                None,
+            )
+            .map_err(|e| anyhow!("Failed to pay offer: {e:?}"))?;
+
+        Ok(payment_id)
+    }
+
+    pub async fn pay_offer_with_timeout(
+        &self,
+        offer: Offer,
+        amount_msats: Option<u64>,
+        timeout_secs: Option<u64>,
+    ) -> anyhow::Result<Payment> {
+        // initiate payment
+        let payment_id = self.init_pay_offer(offer, amount_msats).await?;
+        let timeout: u64 = timeout_secs.unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+
+        self.await_payment(payment_id, timeout).await
     }
 
     pub async fn init_keysend(
@@ -1028,6 +1110,7 @@ impl Node {
         let mut conn = self.db_pool.get()?;
         Payment::create(
             &mut conn,
+            payment_id,
             payment_hash,
             amount_msats as i64,
             Some(node_id),
@@ -1046,12 +1129,12 @@ impl Node {
         timeout_secs: Option<u64>,
     ) -> anyhow::Result<Payment> {
         // initiate payment
-        let (payment_id, payment_hash) = self
+        let (payment_id, _) = self
             .init_keysend(node_id, amount_msats, custom_tlvs)
             .await?;
         let timeout: u64 = timeout_secs.unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
 
-        self.await_payment(payment_id, payment_hash, timeout).await
+        self.await_payment(payment_id, timeout).await
     }
 
     pub async fn connect_to_peer(
@@ -1266,6 +1349,7 @@ fn default_user_config() -> UserConfig {
         accept_inbound_channels: true,
         manually_accept_inbound_channels: true,
         accept_mpp_keysend: true,
+        manually_handle_bolt12_invoices: true,
         ..Default::default()
     }
 }

@@ -41,13 +41,14 @@ diesel::table! {
 diesel::table! {
     payments (id) {
         id -> Int4,
+        payment_id -> Bytea,
         payment_hash -> Bytea,
         preimage -> Nullable<Bytea>,
         amount_msats -> Int8,
         fee_msats -> Nullable<Int8>,
         destination_pubkey -> Nullable<Bytea>,
         bolt11 -> Nullable<Text>,
-        bolt12 -> Nullable<Text>,
+        bolt12 -> Nullable<Bytea>,
         status -> Int2,
         path -> Nullable<Bytea>,
         blinded_tail -> Nullable<Bytea>,
@@ -72,6 +73,7 @@ diesel::table! {
         payment_hash -> Bytea,
         preimage -> Nullable<Bytea>,
         bolt11 -> Nullable<Text>,
+        offer_id -> Nullable<Bytea>,
         amount_msats -> Nullable<Int8>,
         status -> Int2,
         created_at -> Timestamp,

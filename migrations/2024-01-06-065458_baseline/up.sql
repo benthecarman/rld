@@ -4,6 +4,7 @@ CREATE TABLE receives
     payment_hash bytea UNIQUE NOT NULL,
     preimage     bytea UNIQUE,
     bolt11       TEXT UNIQUE,
+    offer_id     bytea,
     amount_msats BIGINT,
     status       SMALLINT     NOT NULL,
     created_at   timestamp    NOT NULL DEFAULT NOW(),
@@ -34,13 +35,14 @@ EXECUTE PROCEDURE update_updated_at();
 CREATE TABLE payments
 (
     id                 SERIAL PRIMARY KEY,
-    payment_hash       bytea     NOT NULL,
+    payment_id         bytea     NOT NULL UNIQUE,
+    payment_hash       bytea     NOT NULL UNIQUE,
     preimage           bytea UNIQUE,
     amount_msats       BIGINT    NOT NULL,
     fee_msats          BIGINT,
-    destination_pubkey bytea, -- keysend
-    bolt11             TEXT UNIQUE,
-    bolt12             TEXT,
+    destination_pubkey bytea,        -- keysend
+    bolt11             TEXT UNIQUE,  -- bolt11 invoice
+    bolt12             bytea UNIQUE, -- bolt12 invoice
     status             SMALLINT  NOT NULL,
     path               bytea,
     blinded_tail       bytea,

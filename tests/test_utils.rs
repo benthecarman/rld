@@ -20,6 +20,7 @@ use rld::logger::RldLogger;
 use rld::models::MIGRATIONS;
 use rld::node::{Node, PubkeyConnectionInfo};
 use std::env;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -297,6 +298,54 @@ pub async fn open_channel_from_lnd(node: &Node, lnd: &mut Lnd) {
     wait_for_lnd_sync(lnd).await;
 
     let chans = node.channel_manager.list_channels();
+    assert_eq!(chans.len(), 1);
+    assert!(chans[0].is_usable);
+    assert!(chans[0]
+        .clone()
+        .channel_type
+        .unwrap()
+        .supports_anchors_zero_fee_htlc_tx());
+}
+
+pub async fn open_channel(node1: &Node, node2: &Node) {
+    // get some coins in the wallet
+    fund_rld(node1).await;
+    fund_rld(node2).await;
+
+    let pk = node2.node_id();
+    let connection_info =
+        SocketAddr::from_str(&format!("127.0.0.1:{}", node2.config.port)).unwrap();
+    node1
+        .connect_to_peer(
+            pk,
+            connection_info.to_socket_addrs().unwrap().next().unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // wait for stable connection
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let _ = node1
+        .open_channel_with_timeout(pk, 1_000_000, 0, None, false, 30)
+        .await
+        .unwrap();
+
+    generate_blocks_and_wait(6).await;
+
+    // wait for channel to be usable
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let chans = node1.channel_manager.list_channels();
+    assert_eq!(chans.len(), 1);
+    assert!(chans[0].is_usable);
+    assert!(chans[0]
+        .clone()
+        .channel_type
+        .unwrap()
+        .supports_anchors_zero_fee_htlc_tx());
+
+    let chans = node2.channel_manager.list_channels();
     assert_eq!(chans.len(), 1);
     assert!(chans[0].is_usable);
     assert!(chans[0]

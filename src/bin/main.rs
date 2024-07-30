@@ -42,6 +42,10 @@ pub mod invoicesrpc {
     tonic::include_proto!("invoicesrpc");
 }
 
+pub mod lndkrpc {
+    tonic::include_proto!("lndkrpc");
+}
+
 pub mod signrpc {
     tonic::include_proto!("signrpc");
 }

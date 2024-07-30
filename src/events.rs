@@ -206,12 +206,15 @@ impl EventHandler {
                             )?
                         }
                         PaymentPurpose::Bolt12OfferPayment {
-                            payment_preimage, ..
-                        } => Receive::mark_as_paid(
+                            payment_preimage,
+                            payment_context,
+                            ..
+                        } => Receive::create_bolt12(
                             conn,
                             payment_hash.0,
-                            payment_preimage.map(|p| p.0),
+                            payment_preimage.unwrap().0,
                             amount_msat as i64,
+                            payment_context.offer_id,
                         )?,
                         PaymentPurpose::Bolt12RefundPayment {
                             payment_preimage, ..
@@ -667,6 +670,19 @@ impl EventHandler {
                 responder,
             } => {
                 log_debug!(self.logger, "EVENT: InvoiceReceived, payment_id: {payment_id:?}, invoice: {invoice:?}, context: {context:?}, responder: {responder:?}");
+
+                let mut conn = self.db_pool.get()?;
+
+                Payment::create(
+                    &mut conn,
+                    payment_id,
+                    invoice.payment_hash(),
+                    invoice.amount_msats() as i64,
+                    None,
+                    None,
+                    Some(&invoice),
+                )?;
+
                 self.channel_manager
                     .send_payment_for_bolt12_invoice(&invoice, &context)
                     .map_err(|e| anyhow!("ERROR: Failed to send payment for invoice: {e:?}"))?;

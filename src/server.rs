@@ -4,6 +4,12 @@
 use crate::channel_acceptor::{ChannelAcceptor, ChannelAcceptorRequest, ChannelAcceptorResponse};
 use crate::invoicesrpc::invoices_server::Invoices;
 use crate::invoicesrpc::*;
+use crate::lndkrpc;
+use crate::lndkrpc::offers_server::Offers;
+use crate::lndkrpc::{
+    Bolt12InvoiceContents, DecodeInvoiceRequest, GetInvoiceRequest, GetInvoiceResponse,
+    PayInvoiceRequest, PayInvoiceResponse, PayOfferRequest, PayOfferResponse, PaymentPaths,
+};
 use crate::lnrpc::channel_point::FundingTxid;
 use crate::lnrpc::fee_limit::Limit;
 use crate::lnrpc::invoice::InvoiceState;
@@ -45,6 +51,7 @@ use bitcoin::address::Payload;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
+use bitcoin::hex::DisplayHex;
 use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use bitcoin::secp256k1::{Message, PublicKey, ThirtyTwoByteHash};
@@ -52,9 +59,12 @@ use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
 use bitcoincore_rpc::json::EstimateMode;
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
+use lightning::blinded_path::{BlindedPath, Direction, IntroductionNode};
 use lightning::events::bump_transaction::WalletSource;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::ln::ChannelId;
+use lightning::offers::invoice::{BlindedPayInfo, Bolt12Invoice};
+use lightning::offers::offer::Offer;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{NodeSigner, Recipient};
 use lightning::util::ser::Writeable;
@@ -1317,7 +1327,7 @@ impl Lightning for Node {
         if let Some((id, payment_hash)) = params {
             let self_clone = self.clone();
             tokio::spawn(async move {
-                let result = self_clone.await_payment(id, payment_hash, 5 * 60).await;
+                let result = self_clone.await_payment(id, 5 * 60).await;
 
                 if tx.is_closed() {
                     return;
@@ -1548,12 +1558,9 @@ impl Lightning for Node {
         &self,
         _: Request<ListInvoiceRequest>, // todo pagination
     ) -> Result<Response<ListInvoiceResponse>, Status> {
-        let mut conn = self
-            .db_pool
-            .get()
+        let invoices = self
+            .list_receives()
             .map_err(|e| Status::internal(e.to_string()))?;
-
-        let invoices = Receive::find_all(&mut conn).map_err(|e| Status::internal(e.to_string()))?;
 
         // todo htlcs
         let invoices = invoices.into_iter().map(receive_to_lnrpc_invoice).collect();
@@ -2652,6 +2659,61 @@ impl WalletKit for Node {
     }
 }
 
+#[tonic::async_trait]
+impl Offers for Node {
+    async fn pay_offer(
+        &self,
+        request: Request<PayOfferRequest>,
+    ) -> Result<Response<PayOfferResponse>, Status> {
+        let req = request.into_inner();
+
+        let offer = Offer::from_str(&req.offer)
+            .map_err(|e| Status::invalid_argument(format!("Invalid offer: {e:?}")))?;
+
+        let payment = self
+            .pay_offer_with_timeout(offer, req.amount, None)
+            .await
+            .map_err(|e| Status::internal(format!("Error paying offer: {e:?}")))?;
+
+        Ok(Response::new(PayOfferResponse {
+            payment_preimage: payment
+                .preimage()
+                .map(|p| hex::encode(p))
+                .unwrap_or_default(),
+        }))
+    }
+
+    async fn get_invoice(
+        &self,
+        request: Request<GetInvoiceRequest>,
+    ) -> Result<Response<GetInvoiceResponse>, Status> {
+        Err(Status::unimplemented("get_invoice")) // todo
+    }
+
+    async fn decode_invoice(
+        &self,
+        request: Request<DecodeInvoiceRequest>,
+    ) -> Result<Response<Bolt12InvoiceContents>, Status> {
+        let req = request.into_inner();
+
+        let invoice_string: Vec<u8> = hex::decode(req.invoice)
+            .map_err(|e| Status::invalid_argument(format!("Invalid invoice hex: {e:?}")))?;
+        let invoice = Bolt12Invoice::try_from(invoice_string)
+            .map_err(|e| Status::invalid_argument(format!("Invalid invoice: {e:?}")))?;
+
+        let reply: Bolt12InvoiceContents = generate_bolt12_invoice_contents(&invoice);
+
+        Ok(Response::new(reply))
+    }
+
+    async fn pay_invoice(
+        &self,
+        request: Request<PayInvoiceRequest>,
+    ) -> Result<Response<PayInvoiceResponse>, Status> {
+        Err(Status::unimplemented("pay_invoice")) // todo
+    }
+}
+
 fn receive_to_lnrpc_invoice(invoice: Receive) -> Invoice {
     let bolt11 = invoice.bolt11();
     let state: InvoiceState = match invoice.status() {
@@ -2764,4 +2826,138 @@ fn get_output_type(spk: &ScriptBuf) -> OutputScriptType {
     } else {
         OutputScriptType::ScriptTypeNonStandard
     }
+}
+
+fn generate_bolt12_invoice_contents(invoice: &Bolt12Invoice) -> Bolt12InvoiceContents {
+    Bolt12InvoiceContents {
+        chain: invoice.chain().to_string(),
+        quantity: invoice.quantity(),
+        amount_msats: invoice.amount_msats(),
+        description: invoice
+            .description()
+            .map(|description| description.to_string()),
+        payment_hash: Some(crate::lndkrpc::PaymentHash {
+            hash: invoice.payment_hash().0.to_vec(),
+        }),
+        created_at: invoice.created_at().as_secs() as i64,
+        relative_expiry: invoice.relative_expiry().as_secs(),
+        node_id: Some(convert_public_key(invoice.signing_pubkey())),
+        signature: invoice.signature().to_string(),
+        payment_paths: extract_payment_paths(invoice),
+        features: convert_features(invoice.invoice_features().clone().encode()),
+    }
+}
+
+fn encode_invoice_as_hex(invoice: &Bolt12Invoice) -> Result<String, Status> {
+    let mut buffer = Vec::new();
+    invoice
+        .write(&mut buffer)
+        .map_err(|e| Status::internal(format!("Error serializing invoice: {e}")))?;
+    Ok(hex::encode(buffer))
+}
+
+fn extract_payment_paths(invoice: &Bolt12Invoice) -> Vec<PaymentPaths> {
+    invoice
+        .payment_paths()
+        .iter()
+        .map(|(blinded_pay_info, blinded_path)| PaymentPaths {
+            blinded_pay_info: Some(convert_blinded_pay_info(blinded_pay_info)),
+            blinded_path: Some(convert_blinded_path(blinded_path)),
+        })
+        .collect()
+}
+
+fn convert_public_key(native_pub_key: PublicKey) -> crate::lndkrpc::PublicKey {
+    let pub_key_bytes = native_pub_key.encode();
+    crate::lndkrpc::PublicKey { key: pub_key_bytes }
+}
+
+fn convert_blinded_pay_info(native_info: &BlindedPayInfo) -> lndkrpc::BlindedPayInfo {
+    lndkrpc::BlindedPayInfo {
+        fee_base_msat: native_info.fee_base_msat,
+        fee_proportional_millionths: native_info.fee_proportional_millionths,
+        cltv_expiry_delta: native_info.cltv_expiry_delta as u32,
+        htlc_minimum_msat: native_info.htlc_minimum_msat,
+        htlc_maximum_msat: native_info.htlc_maximum_msat,
+        features: convert_features(native_info.features.clone().encode()),
+    }
+}
+
+fn convert_blinded_path(native_info: &BlindedPath) -> lndkrpc::BlindedPath {
+    let introduction_node = match native_info.introduction_node {
+        IntroductionNode::NodeId(pubkey) => lndkrpc::IntroductionNode {
+            node_id: Some(convert_public_key(pubkey)),
+            directed_short_channel_id: None,
+        },
+        IntroductionNode::DirectedShortChannelId(direction, scid) => {
+            let rpc_direction = match direction {
+                Direction::NodeOne => lndkrpc::Direction::NodeOne,
+                Direction::NodeTwo => lndkrpc::Direction::NodeTwo,
+            };
+
+            lndkrpc::IntroductionNode {
+                node_id: None,
+                directed_short_channel_id: Some(lndkrpc::DirectedShortChannelId {
+                    direction: rpc_direction.into(),
+                    scid,
+                }),
+            }
+        }
+    };
+
+    lndkrpc::BlindedPath {
+        introduction_node: Some(introduction_node),
+        blinding_point: Some(convert_public_key(native_info.blinding_point)),
+        blinded_hops: native_info
+            .blinded_hops
+            .iter()
+            .map(|hop| lndkrpc::BlindedHop {
+                blinded_node_id: Some(convert_public_key(hop.blinded_node_id)),
+                encrypted_payload: hop.encrypted_payload.clone(),
+            })
+            .collect(),
+    }
+}
+
+// Conversion function for FeatureBit.
+// TODO: Converting the FeatureBits doesn't work quite properly right now.
+fn feature_bit_from_id(feature_id: u8) -> Option<FeatureBit> {
+    match feature_id {
+        0 => Some(FeatureBit::DatalossProtectOpt),
+        1 => Some(FeatureBit::DatalossProtectOpt),
+        3 => Some(FeatureBit::InitialRouingSync),
+        4 => Some(FeatureBit::UpfrontShutdownScriptReq),
+        5 => Some(FeatureBit::UpfrontShutdownScriptOpt),
+        6 => Some(FeatureBit::GossipQueriesReq),
+        7 => Some(FeatureBit::GossipQueriesOpt),
+        8 => Some(FeatureBit::TlvOnionReq),
+        9 => Some(FeatureBit::TlvOnionOpt),
+        10 => Some(FeatureBit::ExtGossipQueriesReq),
+        11 => Some(FeatureBit::ExtGossipQueriesOpt),
+        12 => Some(FeatureBit::StaticRemoteKeyReq),
+        13 => Some(FeatureBit::StaticRemoteKeyOpt),
+        14 => Some(FeatureBit::PaymentAddrReq),
+        15 => Some(FeatureBit::PaymentAddrOpt),
+        16 => Some(FeatureBit::MppReq),
+        17 => Some(FeatureBit::MppOpt),
+        18 => Some(FeatureBit::WumboChannelsReq),
+        19 => Some(FeatureBit::WumboChannelsOpt),
+        20 => Some(FeatureBit::AnchorsReq),
+        21 => Some(FeatureBit::AnchorsOpt),
+        22 => Some(FeatureBit::AnchorsZeroFeeHtlcReq),
+        23 => Some(FeatureBit::AnchorsZeroFeeHtlcOpt),
+        30 => Some(FeatureBit::AmpReq),
+        31 => Some(FeatureBit::AmpOpt),
+        _ => None,
+    }
+}
+
+// Conversion function for features.
+// TODO: Converting the FeatureBits doesn't work quite properly right now.
+fn convert_features(features: Vec<u8>) -> Vec<i32> {
+    features
+        .iter()
+        .filter_map(|&feature_id| feature_bit_from_id(feature_id))
+        .map(|feature_bit| feature_bit as i32) // Cast enum variant to i32
+        .collect()
 }

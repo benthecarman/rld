@@ -18,6 +18,7 @@ impl Logger for RldLogger {
             record.line,
             raw_log
         );
+
         match record.level {
             Level::Gossip => log::trace!("{log}"),
             Level::Trace => log::trace!("{log}"),

@@ -1,7 +1,4 @@
-use crate::test_utils::{
-    create_lnd, create_rld, fund_rld, generate_blocks_and_wait, open_channel_from_lnd,
-    open_channel_from_rld,
-};
+use crate::test_utils::*;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use lnd::tonic_lnd::lnrpc::channel_point::FundingTxid;
 use lnd::tonic_lnd::lnrpc::{ChannelPoint, CloseChannelRequest, Invoice, SendRequest};
@@ -316,4 +313,32 @@ async fn force_close_inbound_channel_from_lnd() {
     assert_eq!(final_balance.lightning, 0);
     assert_eq!(final_balance.force_close, 0);
     assert_eq!(final_balance.on_chain(), 99_020);
+}
+
+/// Do a bolt12 payment from rld to rld
+#[tokio::test]
+async fn bolt12_payment() {
+    let node1 = create_rld().await;
+    let node2 = create_rld().await;
+    open_channel(&node1, &node2).await;
+
+    let amount_msats = 100_000;
+
+    let no_amt = node2.create_offer(None).await.unwrap();
+    let payment = node1
+        .pay_offer_with_timeout(no_amt.clone(), Some(amount_msats), None)
+        .await
+        .unwrap();
+    assert_eq!(payment.status(), PaymentStatus::Completed);
+    assert_eq!(payment.amount_msats, amount_msats as i64);
+    assert!(payment.preimage().is_some());
+    assert!(payment.fee_msats().is_some());
+
+    let recvs = node1.list_receives().unwrap();
+    let recv = recvs
+        .iter()
+        .find(|r| r.payment_hash() == payment.payment_hash())
+        .unwrap();
+    assert_eq!(recv.amount_msats.unwrap(), amount_msats as i64);
+    assert_eq!(recv.offer_id().unwrap(), no_amt.id());
 }

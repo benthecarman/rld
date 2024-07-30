@@ -1,6 +1,7 @@
 use crate::models::schema::receives;
 use bitcoin::hashes::Hash;
 use diesel::prelude::*;
+use lightning::offers::offer::OfferId;
 use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -33,6 +34,7 @@ pub struct Receive {
     payment_hash: Vec<u8>,
     preimage: Option<Vec<u8>>,
     bolt11: Option<String>,
+    offer_id: Option<Vec<u8>>,
     pub amount_msats: Option<i64>,
     pub status: i16,
     pub created_at: chrono::NaiveDateTime,
@@ -47,6 +49,7 @@ pub struct NewReceive {
     pub preimage: Option<Vec<u8>>,
     pub amount_msats: Option<i64>,
     pub bolt11: Option<String>,
+    pub offer_id: Option<Vec<u8>>,
     pub status: i16,
 }
 
@@ -68,6 +71,12 @@ impl Receive {
         self.bolt11
             .as_deref()
             .map(|b| Bolt11Invoice::from_str(b).expect("invalid bolt11"))
+    }
+
+    pub fn offer_id(&self) -> Option<OfferId> {
+        self.offer_id
+            .as_ref()
+            .map(|o| OfferId(o.as_slice().try_into().expect("invalid offer id")))
     }
 
     pub fn status(&self) -> InvoiceStatus {
@@ -99,11 +108,33 @@ impl Receive {
             preimage: None,
             amount_msats: invoice.amount_milli_satoshis().map(|a| a as i64),
             bolt11: Some(invoice.to_string()),
+            offer_id: None,
             status: InvoiceStatus::Pending as i16,
         };
 
         Ok(diesel::insert_into(receives::table)
             .values(&new_invoice)
+            .get_result(conn)?)
+    }
+
+    pub fn create_bolt12(
+        conn: &mut PgConnection,
+        payment_hash: [u8; 32],
+        preimage: [u8; 32],
+        amount_msats: i64,
+        offer: OfferId,
+    ) -> anyhow::Result<Receive> {
+        let bolt12 = NewReceive {
+            payment_hash: payment_hash.to_vec(),
+            preimage: Some(preimage.to_vec()),
+            amount_msats: Some(amount_msats),
+            bolt11: None,
+            offer_id: Some(offer.0.to_vec()),
+            status: InvoiceStatus::Paid as i16,
+        };
+
+        Ok(diesel::insert_into(receives::table)
+            .values(&bolt12)
             .get_result(conn)?)
     }
 
@@ -118,6 +149,7 @@ impl Receive {
             preimage: Some(preimage.to_vec()),
             amount_msats: Some(amount_msats),
             bolt11: None,
+            offer_id: None,
             status: InvoiceStatus::Paid as i16,
         };
 
