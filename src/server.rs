@@ -2617,17 +2617,26 @@ impl WalletKit for Node {
     ) -> Result<Response<SignPsbtResponse>, Status> {
         let req = request.into_inner();
 
-        let psbt = Psbt::deserialize(&req.funded_psbt)
+        let unsigned = Psbt::deserialize(&req.funded_psbt)
             .map_err(|e| Status::invalid_argument(format!("Could not deserialize psbt: {e:?}")))?;
 
         let psbt = self
             .wallet
-            .sign_psbt(psbt)
+            .sign_psbt(unsigned.clone())
             .map_err(|e| Status::invalid_argument(format!("Could not sign psbt: {e:?}")))?;
+
+        // find the indexes of the inputs that we signed
+        let signed_inputs = psbt
+            .inputs
+            .iter()
+            .enumerate()
+            .filter(|(idx, input)| **input != unsigned.inputs[*idx])
+            .map(|(index, _)| index as u32)
+            .collect();
 
         let resp = SignPsbtResponse {
             signed_psbt: psbt.serialize(),
-            signed_inputs: vec![], // todo
+            signed_inputs,
         };
         Ok(Response::new(resp))
     }
