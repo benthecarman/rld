@@ -16,10 +16,14 @@ use lightning::{log_error, log_info};
 use macaroon::{ByteString, Format, Macaroon, MacaroonKey, Verifier};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rld::config::Config;
+use rld::invoicesrpc::invoices_server::InvoicesServer;
+use rld::lndkrpc::offers_server::OffersServer;
 use rld::lnrpc::lightning_server::LightningServer;
 use rld::logger::RldLogger;
 use rld::models::MIGRATIONS;
 use rld::node::Node;
+use rld::signrpc::signer_server::SignerServer;
+use rld::walletrpc::wallet_kit_server::WalletKitServer;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
@@ -193,6 +197,22 @@ async fn main() -> anyhow::Result<()> {
         .tls_config(tls_config)?
         .layer(tower_http::cors::CorsLayer::permissive())
         .add_service(tonic_web::enable(LightningServer::with_interceptor(
+            server_node.clone(),
+            move |req| check_auth(req, &mac_key),
+        )))
+        .add_service(tonic_web::enable(OffersServer::with_interceptor(
+            server_node.clone(),
+            move |req| check_auth(req, &mac_key),
+        )))
+        .add_service(tonic_web::enable(InvoicesServer::with_interceptor(
+            server_node.clone(),
+            move |req| check_auth(req, &mac_key),
+        )))
+        .add_service(tonic_web::enable(WalletKitServer::with_interceptor(
+            server_node.clone(),
+            move |req| check_auth(req, &mac_key),
+        )))
+        .add_service(tonic_web::enable(SignerServer::with_interceptor(
             server_node.clone(),
             move |req| check_auth(req, &mac_key),
         )))

@@ -63,10 +63,12 @@ use lightning::blinded_path::{BlindedPath, Direction, IntroductionNode};
 use lightning::events::bump_transaction::WalletSource;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::ln::ChannelId;
+use lightning::log_info;
 use lightning::offers::invoice::{BlindedPayInfo, Bolt12Invoice};
 use lightning::offers::offer::Offer;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{NodeSigner, Recipient};
+use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
 use lightning_invoice::payment::{
     payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
@@ -2674,6 +2676,7 @@ impl Offers for Node {
         &self,
         request: Request<PayOfferRequest>,
     ) -> Result<Response<PayOfferResponse>, Status> {
+        log_info!(self.logger, "Paying offer!");
         let req = request.into_inner();
 
         let offer = Offer::from_str(&req.offer)
