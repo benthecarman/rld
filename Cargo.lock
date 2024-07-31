@@ -258,55 +258,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
-name = "bdk_bitcoind_rpc"
-version = "0.11.0"
+name = "bdk"
+version = "1.0.0-alpha.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7293e4cf01352d6f9c743d4987cc56242784a1bc23bac8ceb2f404a243df0aec"
-dependencies = [
- "bdk_chain",
- "bitcoin",
- "bitcoincore-rpc",
-]
-
-[[package]]
-name = "bdk_chain"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c601c4dc7e6c3efa538a0afbb43b964cefab9a9b5e8f352fa0ca38145448a5e7"
-dependencies = [
- "bitcoin",
- "miniscript",
- "serde",
-]
-
-[[package]]
-name = "bdk_file_store"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3b425b5b0b673ec5c0bbe55310624fd96c2319c8a6986c1f965edc382a16bf5"
-dependencies = [
- "anyhow",
- "bdk_chain",
- "bdk_persist",
- "bincode",
- "serde",
-]
-
-[[package]]
-name = "bdk_persist"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41528569e8507f078143526c72bdee75f93f17d3b028cb7d88b4889278973e7d"
-dependencies = [
- "anyhow",
- "bdk_chain",
-]
-
-[[package]]
-name = "bdk_wallet"
-version = "1.0.0-alpha.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f830d1a9a090b5837d3813aff8b90888e04b72bf2704b29796e1bab439c86255"
+checksum = "66fc0ebc2a63463f709cfdfbb7e7877b9975bcaea9d2d4f02f97ad012de37e3b"
 dependencies = [
  "anyhow",
  "bdk_chain",
@@ -318,6 +273,51 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bdk_bitcoind_rpc"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce500630e56b97b85bf11e98f1e78cb74f848027370ea6a73492f0ea6ec922a9"
+dependencies = [
+ "bdk_chain",
+ "bitcoin",
+ "bitcoincore-rpc",
+]
+
+[[package]]
+name = "bdk_chain"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e879c03ebf3a64643295152a19a8b0e0a3af22e25539d2bc56ce07d07b059c33"
+dependencies = [
+ "bitcoin",
+ "miniscript",
+ "serde",
+]
+
+[[package]]
+name = "bdk_file_store"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "492a011ee853773bce14f2d899fa34fe3ac3b5f39eeb1504d0d2b28de448bd73"
+dependencies = [
+ "anyhow",
+ "bdk_chain",
+ "bdk_persist",
+ "bincode",
+ "serde",
+]
+
+[[package]]
+name = "bdk_persist"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6f7d6b38071ee828329434f86799e0bb6aaa5a4256e225480c2c53b7b2df295"
+dependencies = [
+ "anyhow",
+ "bdk_chain",
 ]
 
 [[package]]
@@ -2176,9 +2176,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.13.1",
+ "bdk",
  "bdk_bitcoind_rpc",
  "bdk_file_store",
- "bdk_wallet",
  "bip39",
  "bitcoin",
  "bitcoincore-rpc",

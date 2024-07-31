@@ -1,6 +1,6 @@
 use crate::logger::RldLogger;
 use crate::onchain::OnChainWallet;
-use bdk_wallet::chain::ConfirmationTime;
+use bdk::chain::ConfirmationTime;
 use bitcoin::consensus::encode;
 use bitcoin::{Transaction, Txid};
 use bitcoincore_rpc::RpcApi;

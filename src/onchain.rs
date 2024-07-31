@@ -2,14 +2,14 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::coin_type_from_network;
 use crate::logger::RldLogger;
 use anyhow::anyhow;
+use bdk::chain::indexed_tx_graph::Indexer;
+use bdk::chain::{BlockId, ChainOracle, ConfirmationTime};
+use bdk::psbt::PsbtUtils;
+use bdk::template::DescriptorTemplateOut;
+use bdk::wallet::{AddressInfo, Balance};
+use bdk::{KeychainKind, LocalOutput, SignOptions, Wallet};
 use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
-use bdk_wallet::chain::indexed_tx_graph::Indexer;
-use bdk_wallet::chain::{BlockId, ChainOracle, ConfirmationTime};
-use bdk_wallet::psbt::PsbtUtils;
-use bdk_wallet::template::DescriptorTemplateOut;
-use bdk_wallet::wallet::{AddressInfo, Balance};
-use bdk_wallet::{KeychainKind, LocalOutput, SignOptions, Wallet};
 use bitcoin::address::Payload;
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
 use bitcoin::psbt::Psbt;
@@ -326,7 +326,7 @@ impl OnChainWallet {
         let mut psbt = {
             let mut builder = wallet.build_tx();
             builder
-                .add_recipient(spk, bitcoin::Amount::from_sat(amount))
+                .add_recipient(spk, amount)
                 .enable_rbf()
                 .fee_rate(fee_rate);
             builder.finish()?
@@ -409,7 +409,7 @@ impl OnChainWallet {
         builder.fee_rate(fee_rate);
 
         for output in outputs {
-            builder.add_recipient(output.script_pubkey, output.value);
+            builder.add_recipient(output.script_pubkey, output.value.to_sat());
         }
 
         Ok(builder.finish()?)
@@ -505,8 +505,8 @@ impl OnChainWallet {
                         Some(TransactionDetails {
                             transaction: tx.tx_node.tx.clone(),
                             txid: tx.tx_node.txid,
-                            received,
-                            sent,
+                            received: Amount::from_sat(received),
+                            sent: Amount::from_sat(sent),
                             fee,
                             fee_rate,
                             confirmation_time: tx.chain_position.cloned().into(),
@@ -578,8 +578,8 @@ impl OnChainWallet {
                 let details = TransactionDetails {
                     transaction: tx.tx_node.tx.to_owned(),
                     txid,
-                    received,
-                    sent,
+                    received: Amount::from_sat(received),
+                    sent: Amount::from_sat(sent),
                     fee,
                     fee_rate,
                     confirmation_time: tx.chain_position.cloned().into(),
@@ -650,11 +650,11 @@ fn get_tr_descriptors_for_extended_key(
         ChildNumber::from_hardened_idx(0)?, // account number
     ]);
 
-    let receive_descriptor_template = bdk_wallet::descriptor!(tr((
+    let receive_descriptor_template = bdk::descriptor!(tr((
         xprv,
         derivation_path.extend([ChildNumber::Normal { index: 0 }])
     )))?;
-    let change_descriptor_template = bdk_wallet::descriptor!(tr((
+    let change_descriptor_template = bdk::descriptor!(tr((
         xprv,
         derivation_path.extend([ChildNumber::Normal { index: 1 }])
     )))?;

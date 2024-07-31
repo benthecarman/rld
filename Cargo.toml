@@ -35,9 +35,9 @@ bitcoincore-rpc = "0.18.0"
 base64 = "0.13.1"
 hex = "0.4.3"
 
-bdk_wallet = "=1.0.0-alpha.12"
-bdk_file_store = "0.12.0"
-bdk_bitcoind_rpc = "0.11.0"
+bdk = "=1.0.0-alpha.10"
+bdk_file_store = "0.10.0"
+bdk_bitcoind_rpc = "0.9.0"
 
 tonic = { version = "0.11", features = ["tls"] }
 prost = "0.12"

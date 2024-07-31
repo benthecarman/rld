@@ -847,9 +847,8 @@ impl Node {
             .sum();
 
         Balance {
-            confirmed: wallet_balance.confirmed.to_sat(),
-            unconfirmed: (wallet_balance.untrusted_pending + wallet_balance.trusted_pending)
-                .to_sat(),
+            confirmed: wallet_balance.confirmed,
+            unconfirmed: wallet_balance.untrusted_pending + wallet_balance.trusted_pending,
             lightning: lightning_msats / 1_000,
             force_close,
         }
@@ -1264,7 +1263,7 @@ impl Node {
 
         // check we have enough balance
         let wallet_balance = self.wallet.balance();
-        if wallet_balance.trusted_spendable().to_sat() <= amount_sat {
+        if wallet_balance.trusted_spendable() <= amount_sat {
             return Err(anyhow!("Not enough balance"));
         }
 

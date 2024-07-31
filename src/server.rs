@@ -45,8 +45,8 @@ use crate::walletrpc::{
     SignMessageWithAddrResponse, SignPsbtRequest, SignPsbtResponse, VerifyMessageWithAddrRequest,
     VerifyMessageWithAddrResponse,
 };
-use bdk_wallet::chain::ConfirmationTime;
-use bdk_wallet::miniscript::psbt::PsbtExt;
+use bdk::chain::ConfirmationTime;
+use bdk::miniscript::psbt::PsbtExt;
 use bitcoin::address::Payload;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::ecdsa::Signature;
@@ -93,17 +93,17 @@ impl Lightning for Node {
         let balance = self.wallet.balance();
 
         let account = WalletAccountBalance {
-            confirmed_balance: balance.trusted_spendable().to_sat() as i64,
-            unconfirmed_balance: balance.untrusted_pending.to_sat() as i64,
+            confirmed_balance: balance.trusted_spendable() as i64,
+            unconfirmed_balance: balance.untrusted_pending as i64,
         };
 
         let mut account_balance = HashMap::with_capacity(1);
         account_balance.insert("default".to_string(), account);
 
         let response = WalletBalanceResponse {
-            total_balance: balance.total().to_sat() as i64,
-            confirmed_balance: balance.trusted_spendable().to_sat() as i64,
-            unconfirmed_balance: balance.untrusted_pending.to_sat() as i64,
+            total_balance: balance.total() as i64,
+            confirmed_balance: balance.trusted_spendable() as i64,
+            unconfirmed_balance: balance.untrusted_pending as i64,
             locked_balance: 0,
             reserved_balance_anchor_chan: 0,
             account_balance,

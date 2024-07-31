@@ -1,6 +1,6 @@
 use crate::logger::RldLogger;
 use crate::onchain::OnChainWallet;
-use bdk_wallet::KeychainKind;
+use bdk::KeychainKind;
 use bitcoin::absolute::LockTime;
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::ecdh::SharedSecret;
