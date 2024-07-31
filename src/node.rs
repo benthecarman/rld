@@ -1262,6 +1262,12 @@ impl Node {
             return Err(anyhow!("Not connected to peer"));
         }
 
+        // check we have enough balance
+        let wallet_balance = self.wallet.balance();
+        if wallet_balance.trusted_spendable().to_sat() <= amount_sat {
+            return Err(anyhow!("Not enough balance"));
+        }
+
         // save params to db
         let mut conn = self.db_pool.get()?;
         let params = conn.transaction::<_, anyhow::Error, _>(|conn| {
