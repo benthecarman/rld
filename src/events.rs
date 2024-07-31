@@ -97,9 +97,7 @@ impl EventHandler {
                             &counterparty_node_id,
                             "Could not create signed PSBT for channel".to_string(),
                         );
-                        return Err(anyhow!(format!(
-                            "Could not create signed PSBT for channel {user_channel_id}: {e:?}"
-                        )));
+                        return Ok(());
                     }
                 };
 
