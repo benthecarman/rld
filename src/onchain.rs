@@ -191,7 +191,7 @@ impl OnChainWallet {
                     wallet.commit().unwrap();
                 }
 
-                if let Ok(mempool) = emitter.mempool() {
+                if let Some(mempool) = emitter.mempool().ok().filter(|m| !m.is_empty()) {
                     let mut wallet = wallet.write().unwrap();
                     let start_apply_mempool = Instant::now();
                     wallet.apply_unconfirmed_txs(mempool.iter().map(|(tx, time)| (tx, *time)));
