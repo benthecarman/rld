@@ -187,7 +187,7 @@ impl Lightning for Node {
         } = request.into_inner();
 
         if !account.is_empty() || account != "default" {
-            return Err(Status::unimplemented("account is not supported"));
+            return Err(Status::invalid_argument("account is not supported"));
         }
 
         let transactions = self
@@ -329,7 +329,7 @@ impl Lightning for Node {
         let req = request.into_inner();
 
         if req.sat_per_byte != 0 {
-            return Err(Status::unimplemented("sat_per_byte is not supported"));
+            return Err(Status::invalid_argument("sat_per_byte is not supported"));
         }
 
         if req.sat_per_vbyte != 0 && req.target_conf != 0 {
@@ -342,8 +342,8 @@ impl Lightning for Node {
             return Err(Status::invalid_argument("amount or send_all is required"));
         }
 
-        if req.min_confs != 0 {
-            return Err(Status::unimplemented("min_confs is not supported"));
+        if req.min_confs != 0 && req.min_confs != 1 {
+            return Err(Status::invalid_argument("min_confs is not supported"));
         }
 
         let address = Address::from_str(&req.addr)
@@ -395,7 +395,7 @@ impl Lightning for Node {
         } = request.into_inner();
 
         if !account.is_empty() || account != "default" {
-            return Err(Status::unimplemented("account is not supported"));
+            return Err(Status::invalid_argument("account is not supported"));
         }
 
         let utxos = self
@@ -468,7 +468,7 @@ impl Lightning for Node {
         let req = request.into_inner();
 
         if req.sat_per_byte != 0 {
-            return Err(Status::unimplemented("sat_per_byte is not supported"));
+            return Err(Status::invalid_argument("sat_per_byte is not supported"));
         }
 
         if req.sat_per_vbyte != 0 && req.target_conf != 0 {
@@ -482,7 +482,7 @@ impl Lightning for Node {
         }
 
         if req.min_confs != 0 {
-            return Err(Status::unimplemented("min_confs is not supported"));
+            return Err(Status::invalid_argument("min_confs is not supported"));
         }
 
         let fee_rate = if req.sat_per_vbyte != 0 {
@@ -1797,7 +1797,7 @@ impl Lightning for Node {
         let inflight = self.channel_manager.compute_inflight_htlcs();
 
         if !req.source_pub_key.is_empty() {
-            return Err(Status::unimplemented("source_pub_key is not supported"));
+            return Err(Status::invalid_argument("source_pub_key is not supported"));
         }
 
         let final_value_msat = if req.amt_msat > 0 {
@@ -2304,7 +2304,7 @@ impl WalletKit for Node {
         } = request.into_inner();
 
         if !account.is_empty() || account != "default" {
-            return Err(Status::unimplemented("account is not supported"));
+            return Err(Status::invalid_argument("account is not supported"));
         }
 
         let utxos = self
@@ -2409,11 +2409,11 @@ impl WalletKit for Node {
         let req = request.into_inner();
 
         if req.account.is_empty() || req.account != "default" {
-            return Err(Status::unimplemented("account is not supported"));
+            return Err(Status::invalid_argument("account is not supported"));
         }
 
         if req.r#type != AddressType::TaprootPubkey as i32 {
-            return Err(Status::unimplemented("address type is not supported"));
+            return Err(Status::invalid_argument("address type is not supported"));
         }
 
         let info = if req.change {
