@@ -2688,10 +2688,7 @@ impl Offers for Node {
             .map_err(|e| Status::internal(format!("Error paying offer: {e:?}")))?;
 
         Ok(Response::new(PayOfferResponse {
-            payment_preimage: payment
-                .preimage()
-                .map(|p| hex::encode(p))
-                .unwrap_or_default(),
+            payment_preimage: payment.preimage().map(hex::encode).unwrap_or_default(),
         }))
     }
 

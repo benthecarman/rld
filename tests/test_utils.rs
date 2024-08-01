@@ -231,7 +231,7 @@ pub async fn fund_rld(rld: &Node) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let balance = rld.wallet.balance();
-    assert_eq!(balance.confirmed.to_sat(), 100_000_000);
+    assert_eq!(balance.confirmed, 100_000_000);
 }
 
 pub async fn open_channel_from_rld(node: &Node, lnd: &mut Lnd) {
