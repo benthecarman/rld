@@ -22,6 +22,7 @@ use rld::lnrpc::lightning_server::LightningServer;
 use rld::logger::RldLogger;
 use rld::models::MIGRATIONS;
 use rld::node::Node;
+use rld::routerrpc::router_server::RouterServer;
 use rld::signrpc::signer_server::SignerServer;
 use rld::walletrpc::wallet_kit_server::WalletKitServer;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,10 @@ pub mod invoicesrpc {
 
 pub mod lndkrpc {
     tonic::include_proto!("lndkrpc");
+}
+
+pub mod routerrpc {
+    tonic::include_proto!("routerrpc");
 }
 
 pub mod signrpc {
@@ -201,6 +206,10 @@ async fn main() -> anyhow::Result<()> {
             move |req| check_auth(req, &mac_key),
         )))
         .add_service(tonic_web::enable(OffersServer::with_interceptor(
+            server_node.clone(),
+            move |req| check_auth(req, &mac_key),
+        )))
+        .add_service(tonic_web::enable(RouterServer::with_interceptor(
             server_node.clone(),
             move |req| check_auth(req, &mac_key),
         )))

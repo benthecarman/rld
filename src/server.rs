@@ -12,6 +12,7 @@ use crate::lndkrpc::{
 };
 use crate::lnrpc::channel_point::FundingTxid;
 use crate::lnrpc::fee_limit::Limit;
+use crate::lnrpc::htlc_attempt::HtlcStatus;
 use crate::lnrpc::invoice::InvoiceState;
 use crate::lnrpc::lightning_server::Lightning;
 use crate::lnrpc::pending_channels_response::{PendingChannel, PendingOpenChannel};
@@ -22,6 +23,16 @@ use crate::models::received_htlc::ReceivedHtlc;
 use crate::models::routed_payment::RoutedPayment;
 use crate::models::CreatedInvoice;
 use crate::node::Node;
+use crate::routerrpc::{
+    self, BuildRouteRequest, BuildRouteResponse, ForwardHtlcInterceptRequest,
+    ForwardHtlcInterceptResponse, GetMissionControlConfigRequest, GetMissionControlConfigResponse,
+    HtlcEvent, PaymentState, QueryMissionControlRequest, QueryMissionControlResponse,
+    QueryProbabilityRequest, QueryProbabilityResponse, ResetMissionControlRequest,
+    ResetMissionControlResponse, RouteFeeRequest, RouteFeeResponse, SendPaymentRequest,
+    SendToRouteResponse, SetMissionControlConfigRequest, SetMissionControlConfigResponse,
+    SubscribeHtlcEventsRequest, TrackPaymentRequest, TrackPaymentsRequest, UpdateChanStatusRequest,
+    UpdateChanStatusResponse, XImportMissionControlRequest, XImportMissionControlResponse,
+};
 use crate::signrpc::signer_server::Signer;
 use crate::signrpc::{
     InputScriptResp, MuSig2CleanupRequest, MuSig2CleanupResponse, MuSig2CombineKeysRequest,
@@ -63,13 +74,13 @@ use lightning::blinded_path::{BlindedPath, Direction, IntroductionNode};
 use lightning::events::bump_transaction::WalletSource;
 use lightning::ln::channelmanager::{PaymentId, Retry};
 use lightning::ln::ChannelId;
-use lightning::log_info;
 use lightning::offers::invoice::{BlindedPayInfo, Bolt12Invoice};
 use lightning::offers::offer::Offer;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{NodeSigner, Recipient};
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
+use lightning::{log_error, log_info, log_trace};
 use lightning_invoice::payment::{
     payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
 };
@@ -2207,6 +2218,403 @@ impl Invoices for Node {
         _: Request<LookupInvoiceMsg>,
     ) -> Result<Response<Invoice>, Status> {
         Err(Status::unimplemented("lookup_invoice_v2")) // todo
+    }
+}
+
+#[tonic::async_trait]
+impl routerrpc::router_server::Router for Node {
+    type SendPaymentV2Stream = ReceiverStream<Result<Payment, Status>>;
+
+    async fn send_payment_v2(
+        &self,
+        request: Request<SendPaymentRequest>,
+    ) -> Result<Response<Self::SendPaymentV2Stream>, Status> {
+        log_trace!(self.logger, "send_payment_v2");
+        // todo add routing steps
+        let req = request.into_inner();
+
+        let amount_msats = if req.amt > 0 && req.amt_msat > 0 {
+            return Err(Status::invalid_argument("Cannot have amt and amt_msat"));
+        } else if req.amt_msat > 0 {
+            Some(req.amt_msat as u64)
+        } else if req.amt > 0 {
+            Some(req.amt as u64 * 1_000)
+        } else {
+            None
+        };
+
+        let mut value_msats: i64;
+
+        let result = if req.payment_request.is_empty() {
+            if amount_msats.is_none() {
+                return Err(Status::invalid_argument("amt or amt_msat is required"));
+            }
+
+            let node_id = PublicKey::from_slice(&req.dest)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+
+            let tlvs = req.dest_custom_records.into_iter().collect_vec();
+
+            value_msats = amount_msats.unwrap() as i64;
+
+            self.init_keysend(node_id, amount_msats.unwrap(), tlvs)
+                .await
+        } else if let Ok(invoice) = Bolt11Invoice::from_str(&req.payment_request) {
+            if invoice
+                .amount_milli_satoshis()
+                .is_some_and(|a| a != amount_msats.unwrap_or(a))
+            {
+                return Err(Status::invalid_argument(
+                    "Invoice amount does not match request",
+                ));
+            }
+
+            let payment_hash = invoice.payment_hash().as_byte_array().to_vec();
+            value_msats = invoice.amount_milli_satoshis().or(amount_msats).unwrap() as i64;
+            self.init_pay_invoice(invoice, amount_msats).await
+        } else {
+            return Err(Status::invalid_argument("Invalid payment params"));
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Payment, Status>>(128);
+        let mut params: Option<(PaymentId, lightning::ln::PaymentHash)> = None;
+        let first_res = match result {
+            Ok((id, payment_hash)) => {
+                params = Some((id, payment_hash));
+
+                let htlc = HtlcAttempt {
+                    attempt_id: 0,
+                    status: HtlcStatus::InFlight as i32,
+                    route: Some(Route {
+                        total_time_lock: 0,
+                        total_fees: 0,
+                        total_amt: value_msats / 1_000,
+                        hops: vec![],
+                        total_fees_msat: 0,
+                        total_amt_msat: value_msats,
+                    }),
+                    attempt_time_ns: 0,
+                    resolve_time_ns: 0,
+                    failure: None,
+                    preimage: vec![],
+                };
+
+                Payment {
+                    payment_hash: payment_hash.to_string(),
+                    value: value_msats / 1_000,
+                    creation_date: 0,
+                    fee: 0,
+                    payment_preimage: "".to_string(),
+                    value_sat: value_msats / 1_000,
+                    value_msat: value_msats,
+                    payment_request: req.payment_request.clone(),
+                    status: PaymentStatus::Pending as i32,
+                    fee_sat: 0,
+                    fee_msat: 0,
+                    htlcs: vec![htlc],
+                    payment_index: 0,
+                    creation_time_ns: 0,
+                    failure_reason: PaymentFailureReason::FailureReasonNone as i32,
+                }
+            }
+            Err(e) => {
+                log_error!(self.logger, "Error sending payment: {e:?}");
+                Payment {
+                    payment_hash: "".to_string(),
+                    value: 0,
+                    creation_date: 0,
+                    fee: 0,
+                    payment_preimage: "".to_string(),
+                    value_sat: 0,
+                    value_msat: 0,
+                    payment_request: req.payment_request.clone(),
+                    status: PaymentStatus::Failed as i32,
+                    fee_sat: 0,
+                    fee_msat: 0,
+                    creation_time_ns: 0,
+                    htlcs: vec![],
+                    payment_index: 0,
+                    failure_reason: PaymentFailureReason::FailureReasonNoRoute as i32,
+                }
+            }
+        };
+
+        tx.send(Ok(first_res)).await.unwrap();
+
+        if let Some((id, payment_hash)) = params {
+            let self_clone = self.clone();
+            tokio::spawn(async move {
+                let result = self_clone.await_payment(id, 5 * 60).await;
+
+                if tx.is_closed() {
+                    return;
+                }
+
+                let res = match result {
+                    Ok(payment) => Payment {
+                        payment_hash: payment_hash.to_string(),
+                        value: payment.amount_msats() / 1_000,
+                        creation_date: 0,
+                        fee: payment.fee_msats().unwrap_or_default() / 1_000,
+                        payment_preimage: payment.preimage().map(hex::encode).unwrap_or_default(),
+                        value_sat: payment.amount_msats() / 1_000,
+                        value_msat: payment.amount_msats(),
+                        payment_request: req.payment_request,
+                        status: PaymentStatus::Completed as i32,
+                        fee_sat: payment.fee_msats().unwrap_or_default() / 1_000,
+                        fee_msat: payment.fee_msats().unwrap_or_default(),
+                        htlcs: vec![],
+                        payment_index: 0,
+                        creation_time_ns: 0,
+                        failure_reason: PaymentFailureReason::FailureReasonNone as i32,
+                    },
+                    Err(e) => Payment {
+                        payment_hash: payment_hash.to_string(),
+                        value: 0,
+                        creation_date: 0,
+                        fee: 0,
+                        payment_preimage: "".to_string(),
+                        value_sat: 0,
+                        value_msat: 0,
+                        payment_request: req.payment_request,
+                        status: PaymentStatus::Failed as i32,
+                        fee_sat: 0,
+                        fee_msat: 0,
+                        htlcs: vec![],
+                        payment_index: 0,
+                        creation_time_ns: 0,
+                        failure_reason: PaymentFailureReason::FailureReasonError as i32,
+                    },
+                };
+
+                tx.send(Ok(res)).await.unwrap();
+            });
+        }
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    type TrackPaymentV2Stream = ReceiverStream<Result<Payment, Status>>;
+
+    async fn track_payment_v2(
+        &self,
+        request: Request<TrackPaymentRequest>,
+    ) -> Result<Response<Self::TrackPaymentV2Stream>, Status> {
+        log_trace!(self.logger, "track_payment_v2");
+        Err(Status::unimplemented("track_payment_v2")) // todo
+    }
+
+    type TrackPaymentsStream = ReceiverStream<Result<Payment, Status>>;
+
+    async fn track_payments(
+        &self,
+        request: Request<TrackPaymentsRequest>,
+    ) -> Result<Response<Self::TrackPaymentsStream>, Status> {
+        Err(Status::unimplemented("track_payments")) // todo
+    }
+
+    async fn estimate_route_fee(
+        &self,
+        request: Request<RouteFeeRequest>,
+    ) -> Result<Response<RouteFeeResponse>, Status> {
+        Err(Status::unimplemented("estimate_route_fee")) // todo
+    }
+
+    async fn send_to_route(
+        &self,
+        request: Request<routerrpc::SendToRouteRequest>,
+    ) -> Result<Response<SendToRouteResponse>, Status> {
+        Err(Status::unimplemented("send_to_route")) // todo
+    }
+
+    async fn send_to_route_v2(
+        &self,
+        request: Request<routerrpc::SendToRouteRequest>,
+    ) -> Result<Response<HtlcAttempt>, Status> {
+        Err(Status::unimplemented("send_to_route_v2")) // todo
+    }
+
+    async fn reset_mission_control(
+        &self,
+        request: Request<ResetMissionControlRequest>,
+    ) -> Result<Response<ResetMissionControlResponse>, Status> {
+        Err(Status::unimplemented("reset_mission_control")) // todo
+    }
+
+    async fn query_mission_control(
+        &self,
+        request: Request<QueryMissionControlRequest>,
+    ) -> Result<Response<QueryMissionControlResponse>, Status> {
+        Err(Status::unimplemented("query_mission_control")) // todo
+    }
+
+    async fn x_import_mission_control(
+        &self,
+        request: Request<XImportMissionControlRequest>,
+    ) -> Result<Response<XImportMissionControlResponse>, Status> {
+        Err(Status::unimplemented("x_import_mission_control")) // todo
+    }
+
+    async fn get_mission_control_config(
+        &self,
+        request: Request<GetMissionControlConfigRequest>,
+    ) -> Result<Response<GetMissionControlConfigResponse>, Status> {
+        Err(Status::unimplemented("get_mission_control_config")) // todo
+    }
+
+    async fn set_mission_control_config(
+        &self,
+        request: Request<SetMissionControlConfigRequest>,
+    ) -> Result<Response<SetMissionControlConfigResponse>, Status> {
+        Err(Status::unimplemented("set_mission_control_config")) // todo
+    }
+
+    async fn query_probability(
+        &self,
+        request: Request<QueryProbabilityRequest>,
+    ) -> Result<Response<QueryProbabilityResponse>, Status> {
+        Err(Status::unimplemented("query_probability")) // todo
+    }
+
+    async fn build_route(
+        &self,
+        request: Request<BuildRouteRequest>,
+    ) -> Result<Response<BuildRouteResponse>, Status> {
+        Err(Status::unimplemented("build_route")) // todo
+    }
+
+    type SubscribeHtlcEventsStream = ReceiverStream<Result<HtlcEvent, Status>>;
+
+    async fn subscribe_htlc_events(
+        &self,
+        request: Request<SubscribeHtlcEventsRequest>,
+    ) -> Result<Response<Self::SubscribeHtlcEventsStream>, Status> {
+        Err(Status::unimplemented("subscribe_htlc_events")) // todo
+    }
+
+    type SendPaymentStream = ReceiverStream<Result<routerrpc::PaymentStatus, Status>>;
+
+    async fn send_payment(
+        &self,
+        request: Request<SendPaymentRequest>,
+    ) -> Result<Response<Self::SendPaymentStream>, Status> {
+        log_trace!(self.logger, "send_payment");
+        // todo add routing steps
+        let req = request.into_inner();
+
+        let amount_msats = if req.amt > 0 && req.amt_msat > 0 {
+            return Err(Status::invalid_argument("Cannot have amt and amt_msat"));
+        } else if req.amt_msat > 0 {
+            Some(req.amt_msat as u64)
+        } else if req.amt > 0 {
+            Some(req.amt as u64 * 1_000)
+        } else {
+            None
+        };
+
+        let result = if req.payment_request.is_empty() {
+            if amount_msats.is_none() {
+                return Err(Status::invalid_argument("amt or amt_msat is required"));
+            }
+
+            let node_id = PublicKey::from_slice(&req.dest)
+                .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
+
+            let tlvs = req.dest_custom_records.into_iter().collect_vec();
+
+            self.init_keysend(node_id, amount_msats.unwrap(), tlvs)
+                .await
+        } else if let Ok(invoice) = Bolt11Invoice::from_str(&req.payment_request) {
+            if invoice
+                .amount_milli_satoshis()
+                .is_some_and(|a| a != amount_msats.unwrap_or(a))
+            {
+                return Err(Status::invalid_argument(
+                    "Invoice amount does not match request",
+                ));
+            }
+
+            let payment_hash = invoice.payment_hash().as_byte_array().to_vec();
+            self.init_pay_invoice(invoice, amount_msats).await
+        } else {
+            return Err(Status::invalid_argument("Invalid payment params"));
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<routerrpc::PaymentStatus, Status>>(128);
+        let mut params: Option<(PaymentId, lightning::ln::PaymentHash)> = None;
+        let first_res = match result {
+            Ok((id, payment_hash)) => {
+                params = Some((id, payment_hash));
+                routerrpc::PaymentStatus {
+                    state: PaymentState::InFlight as i32,
+                    preimage: vec![],
+                    htlcs: vec![],
+                }
+            }
+            Err(e) => {
+                log_error!(self.logger, "Error sending payment: {e:?}");
+                routerrpc::PaymentStatus {
+                    state: PaymentState::FailedError as i32,
+                    preimage: vec![],
+                    htlcs: vec![],
+                }
+            }
+        };
+
+        tx.send(Ok(first_res)).await.unwrap();
+
+        if let Some((id, payment_hash)) = params {
+            let self_clone = self.clone();
+            tokio::spawn(async move {
+                let result = self_clone.await_payment(id, 5 * 60).await;
+
+                if tx.is_closed() {
+                    return;
+                }
+
+                let res = match result {
+                    Ok(payment) => routerrpc::PaymentStatus {
+                        state: PaymentState::Succeeded as i32,
+                        preimage: payment.preimage().map(|p| p.to_vec()).unwrap_or_default(),
+                        htlcs: vec![],
+                    },
+                    Err(e) => routerrpc::PaymentStatus {
+                        state: PaymentState::FailedNoRoute as i32,
+                        preimage: vec![],
+                        htlcs: vec![],
+                    },
+                };
+
+                tx.send(Ok(res)).await.unwrap();
+            });
+        }
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    type TrackPaymentStream = ReceiverStream<Result<routerrpc::PaymentStatus, Status>>;
+
+    async fn track_payment(
+        &self,
+        request: Request<TrackPaymentRequest>,
+    ) -> Result<Response<Self::TrackPaymentStream>, Status> {
+        Err(Status::unimplemented("track_payment")) // todo
+    }
+
+    type HtlcInterceptorStream = ReceiverStream<Result<ForwardHtlcInterceptRequest, Status>>;
+
+    async fn htlc_interceptor(
+        &self,
+        request: Request<Streaming<ForwardHtlcInterceptResponse>>,
+    ) -> Result<Response<Self::HtlcInterceptorStream>, Status> {
+        Err(Status::unimplemented("htlc_interceptor")) // todo
+    }
+
+    async fn update_chan_status(
+        &self,
+        request: Request<UpdateChanStatusRequest>,
+    ) -> Result<Response<UpdateChanStatusResponse>, Status> {
+        Err(Status::unimplemented("update_chan_status")) // todo
     }
 }
 

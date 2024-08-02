@@ -25,6 +25,10 @@ pub mod lndkrpc {
     tonic::include_proto!("lndkrpc");
 }
 
+pub mod routerrpc {
+    tonic::include_proto!("routerrpc");
+}
+
 pub mod signrpc {
     tonic::include_proto!("signrpc");
 }

@@ -5,6 +5,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "lightning.proto",
         "invoicesrpc/invoices.proto",
         "lndkrpc/lndkrpc.proto",
+        "routerrpc/router.proto",
         "signrpc/signer.proto",
         "walletrpc/walletkit.proto",
     ];
