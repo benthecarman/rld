@@ -1,7 +1,7 @@
 use crate::chain::TxBroadcaster;
 use crate::channel_acceptor::ChannelAcceptor;
 use crate::config::Config;
-use crate::events::EventHandler;
+use crate::events::{EventHandler, PaymentAttempt};
 use crate::fees::RldFeeEstimator;
 use crate::keys::KeysManager;
 use crate::logger::RldLogger;
@@ -243,6 +243,9 @@ pub struct Node {
     pub(crate) invoice_broadcast: broadcast::Sender<Receive>,
     #[allow(unused)]
     pub(crate) invoice_rx: Arc<broadcast::Receiver<Receive>>,
+    pub(crate) payment_attempt_broadcast: broadcast::Sender<PaymentAttempt>,
+    #[allow(unused)]
+    pub(crate) payment_attempt_rx: Arc<broadcast::Receiver<PaymentAttempt>>,
 }
 
 impl Node {
@@ -567,6 +570,7 @@ impl Node {
         ));
 
         let (invoice_broadcast, invoice_rx) = broadcast::channel(16);
+        let (payment_attempt_broadcast, payment_attempt_rx) = broadcast::channel(16);
         let channel_acceptor = Arc::new(tokio::sync::RwLock::new(None));
 
         // Step 18: Handle LDK Events
@@ -580,6 +584,7 @@ impl Node {
             db_pool: db_pool.clone(),
             logger: logger.clone(),
             invoice_broadcast: invoice_broadcast.clone(),
+            payment_attempt_broadcast: payment_attempt_broadcast.clone(),
             channel_acceptor: channel_acceptor.clone(),
         };
         let event_handler_func = move |event: Event| {
@@ -775,6 +780,8 @@ impl Node {
             bp_exit: Arc::new(bp_exit),
             invoice_broadcast,
             invoice_rx: Arc::new(invoice_rx),
+            payment_attempt_broadcast,
+            payment_attempt_rx: Arc::new(payment_attempt_rx),
             channel_acceptor,
         };
 

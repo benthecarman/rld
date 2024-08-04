@@ -16,8 +16,10 @@ use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::Secp256k1;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::{Connection, PgConnection};
-use lightning::events::{ClosureReason, Event, PaymentPurpose, ReplayEvent};
-use lightning::ln::PaymentPreimage;
+use lightning::events::{ClosureReason, Event, PathFailure, PaymentPurpose, ReplayEvent};
+use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::routing::router::Path;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
@@ -26,6 +28,66 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
+
+#[derive(Debug, Clone)]
+pub enum PaymentAttempt {
+    Successful {
+        /// The `payment_id` passed to [`ChannelManager::send_payment`].
+        ///
+        /// [`ChannelManager::send_payment`]: crate::ln::channelmanager::ChannelManager::send_payment
+        payment_id: PaymentId,
+        /// The hash that was given to [`ChannelManager::send_payment`].
+        ///
+        /// [`ChannelManager::send_payment`]: crate::ln::channelmanager::ChannelManager::send_payment
+        payment_hash: PaymentHash,
+        /// The payment path that was successful.
+        ///
+        /// May contain a closed channel if the HTLC sent along the path was fulfilled on chain.
+        path: Path,
+    },
+    Failed {
+        /// The `payment_id` passed to [`ChannelManager::send_payment`].
+        ///
+        /// This will be `Some` for all payment paths which failed on LDK 0.0.103 or later.
+        ///
+        /// [`ChannelManager::send_payment`]: crate::ln::channelmanager::ChannelManager::send_payment
+        /// [`ChannelManager::abandon_payment`]: crate::ln::channelmanager::ChannelManager::abandon_payment
+        payment_id: Option<PaymentId>,
+        /// The hash that was given to [`ChannelManager::send_payment`].
+        ///
+        /// [`ChannelManager::send_payment`]: crate::ln::channelmanager::ChannelManager::send_payment
+        payment_hash: PaymentHash,
+        /// Indicates the payment was rejected for some reason by the recipient. This implies that
+        /// the payment has failed, not just the route in question. If this is not set, the payment may
+        /// be retried via a different route.
+        payment_failed_permanently: bool,
+        /// Extra error details based on the failure type. May contain an update that needs to be
+        /// applied to the [`NetworkGraph`].
+        ///
+        /// [`NetworkGraph`]: crate::routing::gossip::NetworkGraph
+        failure: PathFailure,
+        /// The payment path that failed.
+        path: Path,
+        /// The channel responsible for the failed payment path.
+        ///
+        /// Note that for route hints or for the first hop in a path this may be an SCID alias and
+        /// may not refer to a channel in the public network graph. These aliases may also collide
+        /// with channels in the public network graph.
+        ///
+        /// If this is `Some`, then the corresponding channel should be avoided when the payment is
+        /// retried. May be `None` for older [`Event`] serializations.
+        short_channel_id: Option<u64>,
+    },
+}
+
+impl PaymentAttempt {
+    pub fn payment_id(&self) -> PaymentId {
+        match self {
+            PaymentAttempt::Successful { payment_id, .. } => *payment_id,
+            PaymentAttempt::Failed { payment_id, .. } => payment_id.unwrap(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct EventHandler {
@@ -40,6 +102,7 @@ pub struct EventHandler {
 
     // broadcast channels
     pub invoice_broadcast: Sender<Receive>,
+    pub payment_attempt_broadcast: Sender<PaymentAttempt>,
 
     pub channel_acceptor: Arc<RwLock<Option<ChannelAcceptor>>>,
 }
@@ -296,18 +359,45 @@ impl EventHandler {
                 Ok(())
             }
             Event::PaymentPathSuccessful {
-                payment_id: _,
+                payment_id,
                 payment_hash,
                 path,
             } => {
                 let payment_hash = payment_hash.expect("safe after ldk 0.0.104");
 
                 let mut conn = self.db_pool.get()?;
-                Payment::add_path(&mut conn, payment_hash, path)?;
+                Payment::add_path(&mut conn, payment_hash, path.clone())?;
+
+                self.payment_attempt_broadcast
+                    .send(PaymentAttempt::Successful {
+                        payment_id,
+                        payment_hash,
+                        path,
+                    })
+                    .map_err(|e| anyhow!("Failed to send payment attempt: {e:?}"))?;
 
                 Ok(())
             }
-            Event::PaymentPathFailed { .. } => Ok(()),
+            Event::PaymentPathFailed {
+                payment_id,
+                payment_hash,
+                payment_failed_permanently,
+                failure,
+                path,
+                short_channel_id,
+            } => {
+                self.payment_attempt_broadcast
+                    .send(PaymentAttempt::Failed {
+                        payment_id,
+                        payment_hash,
+                        payment_failed_permanently,
+                        failure,
+                        path,
+                        short_channel_id,
+                    })
+                    .map_err(|e| anyhow!("Failed to send payment attempt: {e:?}"))?;
+                Ok(())
+            }
             Event::ProbeSuccessful { .. } => Ok(()),
             Event::ProbeFailed { .. } => Ok(()),
             Event::PendingHTLCsForwardable { time_forwardable } => {

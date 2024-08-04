@@ -12,9 +12,20 @@ use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PaymentStatus {
-    Pending = 0,
-    Completed = 1,
-    Failed = 2,
+    Pending = 1,
+    Completed = 2,
+    Failed = 3,
+}
+
+impl PaymentStatus {
+    pub fn from_i16(status: i16) -> Option<Self> {
+        match status {
+            1 => Some(PaymentStatus::Pending),
+            2 => Some(PaymentStatus::Completed),
+            3 => Some(PaymentStatus::Failed),
+            _ => None,
+        }
+    }
 }
 
 #[derive(
@@ -111,12 +122,7 @@ impl Payment {
     }
 
     pub fn status(&self) -> PaymentStatus {
-        match self.status {
-            0 => PaymentStatus::Pending,
-            1 => PaymentStatus::Completed,
-            2 => PaymentStatus::Failed,
-            _ => panic!("invalid payment status"),
-        }
+        PaymentStatus::from_i16(self.status).expect("invalid payment status")
     }
 
     pub fn path(&self) -> Option<Vec<RouteHop>> {
