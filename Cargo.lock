@@ -2244,6 +2244,7 @@ dependencies = [
  "diesel_migrations",
  "dotenv",
  "hex",
+ "home",
  "itertools 0.12.1",
  "lazy_static",
  "lightning",

@@ -78,7 +78,7 @@ pub async fn create_rld() -> Node {
     let xpriv = Xpriv::new_master(network, &seed).unwrap();
 
     let config = Config {
-        data_dir: tempdir().unwrap().into_path().to_str().unwrap().to_string(),
+        data_dir: Some(tempdir().unwrap().into_path().to_str().unwrap().to_string()),
         pg_url: env::var("DATABASE_URL").unwrap().to_string(),
         port: get_available_port().unwrap(),
         rpc_port: get_available_port().unwrap(),

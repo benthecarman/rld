@@ -1,14 +1,16 @@
 use clap::Parser;
 use lightning::ln::msgs::SocketAddress;
 use lightning::util::ser::Hostname;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 /// Rust Lightning Daemon
 #[derive(Parser, Debug, Clone)]
 #[command(version, author, about)]
 pub struct Config {
-    /// Location of keys files and data
-    #[clap(default_value = ".", long)]
-    pub data_dir: String,
+    /// Location of keys files and data. If not set, defaults to $HOME/.rld
+    #[clap(short, long)]
+    pub data_dir: Option<String>,
     /// Postgres connection string for payment information
     #[clap(long)]
     pub pg_url: String,
@@ -51,7 +53,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            data_dir: ".".to_string(),
+            data_dir: None,
             pg_url: String::new(),
             port: 9735,
             network: "signet".to_string(),
@@ -77,6 +79,20 @@ impl Config {
             "signet" => bitcoin::Network::Signet,
             _ => panic!("Invalid network"),
         }
+    }
+
+    pub fn data_dir(&self) -> anyhow::Result<PathBuf> {
+        let data_dir = self
+            .data_dir
+            .as_ref()
+            .map(|d| PathBuf::from_str(d))
+            .transpose()?
+            .unwrap_or_else(|| {
+                let mut path = home::home_dir().expect("Could not find home directory");
+                path.push(".rld");
+                path
+            });
+        Ok(PathBuf::from(&data_dir))
     }
 
     pub fn list_address(&self) -> Option<SocketAddress> {

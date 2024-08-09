@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -256,7 +256,7 @@ impl Node {
         logger: Arc<RldLogger>,
         stop: Arc<AtomicBool>,
     ) -> anyhow::Result<Node> {
-        let path = PathBuf::from(&config.data_dir);
+        let path = config.data_dir()?;
 
         let bitcoind_auth = Auth::UserPass(
             config.bitcoind_rpc_user.clone(),
