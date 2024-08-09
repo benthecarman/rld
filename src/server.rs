@@ -81,6 +81,7 @@ use lightning::offers::invoice::{BlindedPayInfo, Bolt12Invoice};
 use lightning::offers::offer::Offer;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{EntropySource, NodeSigner, Recipient};
+use lightning::util::config::MaxDustHTLCExposure;
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
 use lightning::{log_error, log_info, log_trace};
@@ -689,7 +690,7 @@ impl Lightning for Node {
         };
 
         let resp = GetInfoResponse {
-            version: "0.1.0".to_string(),
+            version: "0.17.5-beta".to_string(),
             commit_hash: "unknown".to_string(),
             identity_pubkey: self.node_id().to_string(),
             alias: self.config.alias().to_string(),
@@ -861,8 +862,25 @@ impl Lightning for Node {
                     close_address: "".to_string(),
                     push_amount_sat: 0,
                     thaw_height: 0,
-                    local_constraints: None,
-                    remote_constraints: None,
+                    local_constraints: Some(ChannelConstraints {
+                        csv_delay: c.force_close_spend_delay.unwrap_or_default() as u32,
+                        chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default(),
+                        dust_limit_sat: match c.config.unwrap().max_dust_htlc_exposure {
+                            MaxDustHTLCExposure::FixedLimitMsat(msats) => msats / 1000,
+                            MaxDustHTLCExposure::FeeRateMultiplier(_) => 0, // todo
+                        },
+                        max_pending_amt_msat: c.outbound_capacity_msat,
+                        min_htlc_msat: c.next_outbound_htlc_minimum_msat,
+                        max_accepted_htlcs: 40, // todo
+                    }),
+                    remote_constraints: Some(ChannelConstraints {
+                        csv_delay: c.force_close_spend_delay.unwrap_or_default() as u32,
+                        chan_reserve_sat: c.counterparty.unspendable_punishment_reserve,
+                        dust_limit_sat: 0, // todo
+                        max_pending_amt_msat: c.inbound_capacity_msat,
+                        min_htlc_msat: c.inbound_htlc_minimum_msat.unwrap_or_default(),
+                        max_accepted_htlcs: 40, // todo
+                    }),
                     alias_scids: c.inbound_scid_alias.map(|a| vec![a]).unwrap_or_default(),
                     zero_conf: false,
                     zero_conf_confirmed_scid: 0,
@@ -890,7 +908,9 @@ impl Lightning for Node {
         &self,
         request: Request<ClosedChannelsRequest>,
     ) -> Result<Response<ClosedChannelsResponse>, Status> {
-        Err(Status::unimplemented("closed_channels")) // todo
+        // todo
+        let resp = ClosedChannelsResponse { channels: vec![] };
+        Ok(Response::new(resp))
     }
 
     async fn open_channel_sync(
