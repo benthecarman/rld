@@ -72,4 +72,8 @@ impl ChannelClosure {
     pub fn find_by_id(conn: &mut PgConnection, id: i32) -> anyhow::Result<Option<ChannelClosure>> {
         Ok(channel_closures::table.find(id).first(conn).optional()?)
     }
+
+    pub fn list_closures(conn: &mut PgConnection) -> anyhow::Result<Vec<ChannelClosure>> {
+        Ok(channel_closures::table.load::<ChannelClosure>(conn)?)
+    }
 }

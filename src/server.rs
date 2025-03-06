@@ -19,6 +19,7 @@ use crate::lnrpc::lightning_server::Lightning;
 use crate::lnrpc::payment::PaymentStatus;
 use crate::lnrpc::pending_channels_response::{PendingChannel, PendingOpenChannel};
 use crate::lnrpc::*;
+use crate::models::channel_closure::ChannelClosure;
 use crate::models::receive::{InvoiceStatus, Receive};
 use crate::models::received_htlc::ReceivedHtlc;
 use crate::models::routed_payment::RoutedPayment;
@@ -908,8 +909,42 @@ impl Lightning for Node {
         &self,
         request: Request<ClosedChannelsRequest>,
     ) -> Result<Response<ClosedChannelsResponse>, Status> {
-        // todo
-        let resp = ClosedChannelsResponse { channels: vec![] };
+        let req = request.into_inner();
+
+        let mut conn = self
+            .db_pool
+            .get()
+            .map_err(|e| Status::internal(format!("Error getting database connection: {e}")))?;
+
+        let closures = ChannelClosure::list_closures(&mut conn)
+            .map_err(|e| Status::internal(format!("Error listing channel closures: {e}")))?;
+
+        let chain_hash = self.network.chain_hash().to_string();
+        let channels: Vec<ChannelCloseSummary> = closures
+            .into_iter()
+            .map(|c| {
+                // todo missing a bunch of fields
+                ChannelCloseSummary {
+                    channel_point: c.funding_txo().map(|x| x.to_string()).unwrap_or_default(),
+                    chan_id: c.id as u64,
+                    chain_hash: chain_hash.clone(),
+                    closing_tx_hash: "".to_string(),
+                    remote_pubkey: c.node_id().to_string(),
+                    capacity: 0,
+                    close_height: 0,
+                    settled_balance: 0,
+                    time_locked_balance: 0,
+                    close_type: 0,
+                    open_initiator: 0,
+                    close_initiator: 0,
+                    resolutions: vec![],
+                    alias_scids: vec![],
+                    zero_conf_confirmed_scid: 0,
+                }
+            })
+            .collect();
+
+        let resp = ClosedChannelsResponse { channels };
         Ok(Response::new(resp))
     }
 
