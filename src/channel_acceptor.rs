@@ -1,6 +1,6 @@
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Address;
-use lightning::ln::ChannelId;
+use lightning::ln::types::ChannelId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};

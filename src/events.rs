@@ -14,6 +14,7 @@ use anyhow::anyhow;
 use bitcoin::absolute::LockTime;
 use bitcoin::constants::ChainHash;
 use bitcoin::secp256k1::Secp256k1;
+use bitcoin::Amount;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::{Connection, PgConnection};
 use lightning::events::{ClosureReason, Event, PathFailure, PaymentPurpose, ReplayEvent};
@@ -146,7 +147,7 @@ impl EventHandler {
 
                 let psbt = match self.wallet.create_signed_psbt_to_spk(
                     output_script,
-                    channel_value_satoshis,
+                    Amount::from_sat(channel_value_satoshis),
                     params.sats_per_vbyte(),
                 ) {
                     Ok(psbt) => psbt,
@@ -168,8 +169,8 @@ impl EventHandler {
                 params.set_opening_tx(&tx);
 
                 if let Err(e) = self.channel_manager.funding_transaction_generated(
-                    &temporary_channel_id,
-                    &counterparty_node_id,
+                    temporary_channel_id,
+                    counterparty_node_id,
                     tx,
                 ) {
                     log_error!(
@@ -321,13 +322,6 @@ impl EventHandler {
 
                 Ok(())
             }
-            Event::InvoiceRequestFailed { payment_id } => {
-                log_info!(
-                    self.logger,
-                    "EVENT: InvoiceRequestFailed payment_id: {payment_id}"
-                );
-                Ok(())
-            }
             Event::PaymentSent {
                 payment_id,
                 payment_preimage,
@@ -354,7 +348,9 @@ impl EventHandler {
                 log_info!(self.logger, "EVENT: PaymentFailed payment_id: {payment_id}, payment_hash: {payment_hash:?}, reason: {reason:?}");
 
                 let mut conn = self.db_pool.get()?;
-                Payment::payment_failed(&mut conn, payment_hash)?;
+                if let Some(payment_hash) = payment_hash {
+                    Payment::payment_failed(&mut conn, payment_hash)?;
+                }
 
                 Ok(())
             }
@@ -616,6 +612,8 @@ impl EventHandler {
                 funding_satoshis,
                 push_msat,
                 channel_type: _,
+                is_announced: _,
+                params,
             } => {
                 log_debug!(
                     self.logger,
@@ -644,14 +642,13 @@ impl EventHandler {
                             pending_chan_id: temporary_channel_id,
                             funding_amt: funding_satoshis,
                             push_amt: push_msat,
-                            // todo https://github.com/lightningdevkit/rust-lightning/pull/3019
-                            dust_limit: 0,
-                            max_value_in_flight: 0,
+                            dust_limit: params.dust_limit_satoshis,
+                            max_value_in_flight: params.max_htlc_value_in_flight_msat,
                             channel_reserve: 0,
-                            min_htlc: 0,
-                            fee_per_kw: 0,
-                            csv_delay: 0,
-                            max_accepted_htlcs: 0,
+                            min_htlc: params.htlc_minimum_msat,
+                            fee_per_kw: params.commitment_feerate_sat_per_1000_weight as u64,
+                            csv_delay: params.to_self_delay as u32,
+                            max_accepted_htlcs: params.max_accepted_htlcs as u32,
                             channel_flags: 0,
                             commitment_type: 0,
                             wants_zero_conf: false,
@@ -772,7 +769,7 @@ impl EventHandler {
                 )?;
 
                 self.channel_manager
-                    .send_payment_for_bolt12_invoice(&invoice, &context)
+                    .send_payment_for_bolt12_invoice(&invoice, context.as_ref())
                     .map_err(|e| anyhow!("ERROR: Failed to send payment for invoice: {e:?}"))?;
                 Ok(())
             }

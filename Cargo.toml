@@ -16,29 +16,29 @@ log = "0.4.18"
 pretty_env_logger = "0.5.0"
 anyhow = "1.0"
 bip39 = { version = "2.0.0", features = ["serde"] }
-bitcoin = "0.31.2"
+bitcoin = "0.32.5"
 chrono = { version = "0.4.26", features = ["serde"] }
 diesel = { version = "2.1", features = ["postgres", "r2d2", "chrono", "numeric"] }
 diesel_migrations = "2.1.0"
 itertools = "0.12.1"
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3beb16cb30592c101ca16e6e650ec6c4b6dd99cb", features = ["max_level_trace"] }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3beb16cb30592c101ca16e6e650ec6c4b6dd99cb" }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3beb16cb30592c101ca16e6e650ec6c4b6dd99cb", features = ["futures"] }
-lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3beb16cb30592c101ca16e6e650ec6c4b6dd99cb", features = ["rpc-client", "tokio"] }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3beb16cb30592c101ca16e6e650ec6c4b6dd99cb" }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3beb16cb30592c101ca16e6e650ec6c4b6dd99cb", features = ["serde"] }
+lightning = { version = "0.0.125", features = ["max_level_trace"] }
+lightning-net-tokio = { version = "0.0.125" }
+lightning-background-processor = { version = "0.0.125", features = ["futures"] }
+lightning-block-sync = { version = "0.0.125", features = ["rpc-client", "tokio"] }
+lightning-persister = { version = "0.0.125" }
+lightning-invoice = { version = "0.32.0", features = ["serde", "std"] }
 serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1.36.0", features = ["full", "sync"] }
 clap = { version = "4.5.3", features = ["derive"] }
-bitcoincore-rpc = "0.18.0"
+bitcoincore-rpc = "0.19.0"
 base64 = "0.13.1"
 hex = "0.4.3"
 home = "0.5.9"
 
-bdk = "=1.0.0-alpha.10"
-bdk_file_store = "0.10.0"
-bdk_bitcoind_rpc = "0.9.0"
+bdk_wallet = { version = "1.1.0", features = ["file_store"] }
+bdk_file_store = "0.18.1"
+bdk_bitcoind_rpc = "0.18.0"
 
 tonic = { version = "0.11", features = ["tls"] }
 prost = "0.12"
@@ -53,6 +53,7 @@ tonic-build = "0.11"
 
 [dev-dependencies]
 dotenv = "0.15.0"
-bitcoind = { version = "0.34.2", features = ["25_1"] }
+corepc-node = { version = "0.5.0", features = ["28_0"] }
+test-log = "0.2.17"
 lazy_static = "1.4.0"
-lnd = { version = "0.1.4", git = "https://github.com/benthecarman/lnd-test-util.git", branch = "optional-bitcoind", features = ["lnd_0_17_5"] }
+lnd = { version = "0.1.6", git = "https://github.com/benthecarman/lnd-test-util.git", branch = "bitcoind-36", features = ["lnd_0_18_5"] }

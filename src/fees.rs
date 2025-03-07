@@ -58,7 +58,20 @@ impl RldFeeEstimator {
                 None => 5_000,
             }
         };
-        hash_map.insert(ConfirmationTarget::OnChainSweep, high_prio_estimate);
+
+        let very_high_prio_estimate = {
+            let resp = rpc.estimate_smart_fee(2, Some(EstimateMode::Conservative))?;
+            match resp.fee_rate {
+                Some(fee) => convert_fee_rate(fee.to_btc()),
+                None => 50_000,
+            }
+        };
+
+        hash_map.insert(
+            ConfirmationTarget::MaximumFeeEstimate,
+            very_high_prio_estimate,
+        );
+        hash_map.insert(ConfirmationTarget::UrgentOnChainSweep, high_prio_estimate);
         hash_map.insert(
             ConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee,
             mempoolmin_estimate,
@@ -86,8 +99,8 @@ impl RldFeeEstimator {
     }
 
     pub fn get_high_fee_rate(&self) -> u32 {
-        // OnChainSweep is the highest fee rate we have, so use that
-        self.get_est_sat_per_1000_weight(ConfirmationTarget::OnChainSweep)
+        // UrgentOnChainSweep is the highest fee rate we have, so use that
+        self.get_est_sat_per_1000_weight(ConfirmationTarget::UrgentOnChainSweep)
     }
 }
 

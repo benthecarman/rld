@@ -59,9 +59,7 @@ use crate::walletrpc::{
     VerifyMessageWithAddrResponse,
 };
 use crate::{lndkrpc, models};
-use bdk::chain::ConfirmationTime;
-use bdk::miniscript::psbt::PsbtExt;
-use bitcoin::address::Payload;
+use bdk_wallet::chain::ChainPosition;
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::ecdsa::Signature;
 use bitcoin::hashes::{sha256, sha256::Hash as Sha256, sha256d::Hash as Sha256d, Hash};
@@ -73,12 +71,17 @@ use bitcoin::{Address, FeeRate, Network, ScriptBuf, TxOut, Txid};
 use bitcoincore_rpc::json::EstimateMode;
 use bitcoincore_rpc::RpcApi;
 use itertools::Itertools;
-use lightning::blinded_path::{BlindedPath, Direction, IntroductionNode};
+use lightning::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
+use lightning::blinded_path::{Direction, IntroductionNode};
 use lightning::events::bump_transaction::WalletSource;
 use lightning::events::PathFailure;
+use lightning::ln::bolt11_payment::{
+    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
+};
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
-use lightning::ln::{ChannelId, PaymentPreimage};
-use lightning::offers::invoice::{BlindedPayInfo, Bolt12Invoice};
+use lightning::ln::types::ChannelId;
+use lightning::ln::PaymentPreimage;
+use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::Offer;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{EntropySource, NodeSigner, Recipient};
@@ -86,9 +89,6 @@ use lightning::util::config::MaxDustHTLCExposure;
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
 use lightning::{log_error, log_info, log_trace};
-use lightning_invoice::payment::{
-    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
-};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -109,17 +109,17 @@ impl Lightning for Node {
         let balance = self.wallet.balance();
 
         let account = WalletAccountBalance {
-            confirmed_balance: balance.trusted_spendable() as i64,
-            unconfirmed_balance: balance.untrusted_pending as i64,
+            confirmed_balance: balance.trusted_spendable().to_sat() as i64,
+            unconfirmed_balance: balance.untrusted_pending.to_sat() as i64,
         };
 
         let mut account_balance = HashMap::with_capacity(1);
         account_balance.insert("default".to_string(), account);
 
         let response = WalletBalanceResponse {
-            total_balance: balance.total() as i64,
-            confirmed_balance: balance.trusted_spendable() as i64,
-            unconfirmed_balance: balance.untrusted_pending as i64,
+            total_balance: balance.total().to_sat() as i64,
+            confirmed_balance: balance.trusted_spendable().to_sat() as i64,
+            unconfirmed_balance: balance.untrusted_pending.to_sat() as i64,
             locked_balance: 0,
             reserved_balance_anchor_chan: 0,
             account_balance,
@@ -183,8 +183,8 @@ impl Lightning for Node {
             pending_open_balance: (pending_open_balance / 1000) as i64,
             local_balance: Some(local_balance),
             remote_balance: Some(remote_balance),
-            unsettled_local_balance: Some(Amount::default()),
-            unsettled_remote_balance: Some(Amount::default()),
+            unsettled_local_balance: Some(Default::default()),
+            unsettled_remote_balance: Some(Default::default()),
             pending_open_local_balance: Some(pending_local_balance),
             pending_open_remote_balance: Some(pending_remote_balance),
         };
@@ -219,9 +219,11 @@ impl Lightning for Node {
         let transactions = transactions
             .into_iter()
             .filter_map(|t| {
-                let (block_height, time_stamp) = match t.confirmation_time {
-                    ConfirmationTime::Confirmed { height, time } => (height as i32, time),
-                    ConfirmationTime::Unconfirmed { last_seen } => (-1, last_seen),
+                let (block_height, time_stamp) = match t.chain_position {
+                    ChainPosition::Confirmed { anchor, .. } => {
+                        (anchor.block_id.height as i32, anchor.confirmation_time)
+                    }
+                    ChainPosition::Unconfirmed { last_seen } => (-1, last_seen.unwrap_or_default()),
                 };
 
                 if block_height < start_height || block_height > end_height {
@@ -282,7 +284,7 @@ impl Lightning for Node {
                     block_hash,
                     block_height,
                     time_stamp: time_stamp as i64,
-                    total_fees: t.fee.unwrap_or_default() as i64,
+                    total_fees: t.fee.unwrap_or_default().to_sat() as i64,
                     dest_addresses,
                     output_details,
                     raw_tx_hex,
@@ -316,7 +318,7 @@ impl Lightning for Node {
                     Address::from_str(&addr)
                         .map_err(|e| Status::invalid_argument(format!("{:?}", e)))
                         .map(|a| TxOut {
-                            script_pubkey: a.payload().script_pubkey(),
+                            script_pubkey: a.assume_checked().script_pubkey(),
                             value: bitcoin::Amount::from_sat(amt as u64),
                         })
                 })
@@ -327,7 +329,7 @@ impl Lightning for Node {
                 .estimate_fee_to_outputs(outputs, Some(fee_rate))
                 .map_err(|e| Status::internal(e.to_string()))?;
             let response = EstimateFeeResponse {
-                fee_sat: fee_sat as i64,
+                fee_sat: fee_sat.to_sat() as i64,
                 feerate_sat_per_byte: fee_rate.to_sat_per_vb_ceil() as i64,
                 sat_per_vbyte: fee_rate.to_sat_per_vb_ceil(),
             };
@@ -385,7 +387,11 @@ impl Lightning for Node {
 
         let txid = if req.amount > 0 {
             self.wallet
-                .send_to_address(address, req.amount as u64, fee_rate)
+                .send_to_address(
+                    address,
+                    bitcoin::Amount::from_sat(req.amount as u64),
+                    fee_rate,
+                )
                 .map_err(|e| Status::internal(format!("Error sending coins: {:?}", e)))?
         } else if req.send_all {
             self.wallet
@@ -427,17 +433,17 @@ impl Lightning for Node {
         let utxos = utxos
             .into_iter()
             .filter_map(|u| {
-                let confs = match u.confirmation_time {
-                    ConfirmationTime::Confirmed { height, .. } => {
-                        current_height as i32 - height as i32 + 1
+                let confs = match u.chain_position {
+                    ChainPosition::Confirmed { anchor, .. } => {
+                        current_height as i32 - anchor.block_id.height as i32 + 1
                     }
-                    ConfirmationTime::Unconfirmed { .. } => 0,
+                    ChainPosition::Unconfirmed { .. } => 0,
                 };
 
                 if confs >= min_confs && confs <= max_confs {
-                    let address_type = if u.txout.script_pubkey.is_v1_p2tr() {
+                    let address_type = if u.txout.script_pubkey.is_p2tr() {
                         AddressType::TaprootPubkey
-                    } else if u.txout.script_pubkey.is_v0_p2wpkh() {
+                    } else if u.txout.script_pubkey.is_p2wpkh() {
                         AddressType::WitnessPubkeyHash
                     } else if u.txout.script_pubkey.is_p2sh() {
                         AddressType::NestedPubkeyHash
@@ -524,7 +530,7 @@ impl Lightning for Node {
                 Address::from_str(&addr)
                     .map_err(|e| Status::invalid_argument(format!("{:?}", e)))
                     .map(|a| TxOut {
-                        script_pubkey: a.payload().script_pubkey(),
+                        script_pubkey: a.assume_checked().script_pubkey(),
                         value: bitcoin::Amount::from_sat(amt as u64),
                     })
             })
@@ -782,7 +788,7 @@ impl Lightning for Node {
                         commitment_type: commitment_type.into(),
                         num_forwarding_packages: 0,
                         chan_status_flags: "".to_string(),
-                        private: !c.is_public,
+                        private: !c.is_announced,
                         memo: "".to_string(),
                     }),
                     commit_fee: 0,
@@ -850,7 +856,7 @@ impl Lightning for Node {
                     num_updates: 0,
                     pending_htlcs: vec![],
                     csv_delay: c.force_close_spend_delay.unwrap_or_default() as u32,
-                    private: !c.is_public,
+                    private: !c.is_announced,
                     initiator: c.is_outbound,
                     chan_status_flags: "".to_string(),
                     local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default()
@@ -1238,7 +1244,6 @@ impl Lightning for Node {
                 .require_network(self.network)
                 .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
             let script = address
-                .payload()
                 .script_pubkey()
                 .try_into()
                 .map_err(|e| Status::invalid_argument(format!("{e:?}")))?;
@@ -1391,7 +1396,7 @@ impl Lightning for Node {
             };
 
             (
-                lightning::ln::PaymentHash(payment_hash.into_32()),
+                lightning::ln::PaymentHash(payment_hash.to_byte_array()),
                 onion,
                 route_params,
                 pk,
@@ -1531,7 +1536,7 @@ impl Lightning for Node {
                 };
 
                 match self_clone.channel_manager.send_payment_with_route(
-                    &route,
+                    route,
                     hash,
                     onion.clone(),
                     payment_id,
@@ -2489,7 +2494,7 @@ impl routerrpc::router_server::Router for Node {
             };
 
             (
-                lightning::ln::PaymentHash(payment_hash.into_32()),
+                lightning::ln::PaymentHash(payment_hash.to_byte_array()),
                 onion,
                 route_params,
                 pk,
@@ -2665,7 +2670,7 @@ impl routerrpc::router_server::Router for Node {
                 payment.htlcs = htlcs;
 
                 match self_clone.channel_manager.send_payment_with_route(
-                    &route,
+                    route.clone(),
                     hash,
                     onion.clone(),
                     payment_id,
@@ -3001,11 +3006,11 @@ impl WalletKit for Node {
         let utxos = utxos
             .into_iter()
             .filter_map(|u| {
-                let confs = match u.confirmation_time {
-                    ConfirmationTime::Confirmed { height, .. } => {
-                        current_height as i32 - height as i32 + 1
+                let confs = match u.chain_position {
+                    ChainPosition::Confirmed { anchor, .. } => {
+                        current_height as i32 - anchor.block_id.height as i32 + 1
                     }
-                    ConfirmationTime::Unconfirmed { .. } => 0,
+                    ChainPosition::Unconfirmed { .. } => 0,
                 };
 
                 if unconfirmed_only && confs > 0 {
@@ -3013,9 +3018,9 @@ impl WalletKit for Node {
                 }
 
                 if confs >= min_confs && confs <= max_confs {
-                    let address_type = if u.txout.script_pubkey.is_v1_p2tr() {
+                    let address_type = if u.txout.script_pubkey.is_p2tr() {
                         AddressType::TaprootPubkey
-                    } else if u.txout.script_pubkey.is_v0_p2wpkh() {
+                    } else if u.txout.script_pubkey.is_p2wpkh() {
                         AddressType::WitnessPubkeyHash
                     } else if u.txout.script_pubkey.is_p2sh() {
                         AddressType::NestedPubkeyHash
@@ -3338,13 +3343,12 @@ impl WalletKit for Node {
             .sign_psbt(psbt)
             .map_err(|e| Status::invalid_argument(format!("Could not sign psbt: {e:?}")))?;
 
-        let raw_final_tx = psbt
-            .extract(&self.secp)
-            .map(|tx| serialize(&tx))
-            .unwrap_or(vec![]);
+        let signed_psbt = psbt.serialize();
+
+        let raw_final_tx = psbt.extract_tx().map(|tx| serialize(&tx)).unwrap_or(vec![]);
 
         let resp = FinalizePsbtResponse {
-            signed_psbt: psbt.serialize(),
+            signed_psbt,
             raw_final_tx,
         };
         Ok(Response::new(resp))
@@ -3501,11 +3505,11 @@ fn get_output_type(spk: &ScriptBuf) -> OutputScriptType {
         OutputScriptType::ScriptTypePubkeyHash
     } else if spk.is_p2sh() {
         OutputScriptType::ScriptTypeScriptHash
-    } else if spk.is_v0_p2wpkh() {
+    } else if spk.is_p2wpkh() {
         OutputScriptType::ScriptTypeWitnessV0PubkeyHash
-    } else if spk.is_v0_p2wsh() {
+    } else if spk.is_p2wsh() {
         OutputScriptType::ScriptTypeWitnessV0ScriptHash
-    } else if spk.is_v1_p2tr() {
+    } else if spk.is_p2tr() {
         OutputScriptType::ScriptTypeWitnessV1Taproot
     } else if spk.is_witness_program() {
         OutputScriptType::ScriptTypeWitnessUnknown
@@ -3550,16 +3554,16 @@ fn extract_payment_paths(invoice: &Bolt12Invoice) -> Vec<PaymentPaths> {
     invoice
         .payment_paths()
         .iter()
-        .map(|(blinded_pay_info, blinded_path)| PaymentPaths {
-            blinded_pay_info: Some(convert_blinded_pay_info(blinded_pay_info)),
-            blinded_path: Some(convert_blinded_path(blinded_path)),
+        .map(|blinded_pay_info| PaymentPaths {
+            blinded_pay_info: Some(convert_blinded_pay_info(&blinded_pay_info.payinfo)),
+            blinded_path: Some(convert_blinded_path(blinded_pay_info)),
         })
         .collect()
 }
 
-fn convert_public_key(native_pub_key: PublicKey) -> crate::lndkrpc::PublicKey {
+fn convert_public_key(native_pub_key: PublicKey) -> lndkrpc::PublicKey {
     let pub_key_bytes = native_pub_key.encode();
-    crate::lndkrpc::PublicKey { key: pub_key_bytes }
+    lndkrpc::PublicKey { key: pub_key_bytes }
 }
 
 fn convert_blinded_pay_info(native_info: &BlindedPayInfo) -> lndkrpc::BlindedPayInfo {
@@ -3573,10 +3577,10 @@ fn convert_blinded_pay_info(native_info: &BlindedPayInfo) -> lndkrpc::BlindedPay
     }
 }
 
-fn convert_blinded_path(native_info: &BlindedPath) -> lndkrpc::BlindedPath {
-    let introduction_node = match native_info.introduction_node {
+fn convert_blinded_path(native_info: &BlindedPaymentPath) -> lndkrpc::BlindedPath {
+    let introduction_node = match native_info.introduction_node() {
         IntroductionNode::NodeId(pubkey) => lndkrpc::IntroductionNode {
-            node_id: Some(convert_public_key(pubkey)),
+            node_id: Some(convert_public_key(*pubkey)),
             directed_short_channel_id: None,
         },
         IntroductionNode::DirectedShortChannelId(direction, scid) => {
@@ -3589,7 +3593,7 @@ fn convert_blinded_path(native_info: &BlindedPath) -> lndkrpc::BlindedPath {
                 node_id: None,
                 directed_short_channel_id: Some(lndkrpc::DirectedShortChannelId {
                     direction: rpc_direction.into(),
-                    scid,
+                    scid: *scid,
                 }),
             }
         }
@@ -3597,9 +3601,9 @@ fn convert_blinded_path(native_info: &BlindedPath) -> lndkrpc::BlindedPath {
 
     lndkrpc::BlindedPath {
         introduction_node: Some(introduction_node),
-        blinding_point: Some(convert_public_key(native_info.blinding_point)),
+        blinding_point: Some(convert_public_key(native_info.blinding_point())),
         blinded_hops: native_info
-            .blinded_hops
+            .blinded_hops()
             .iter()
             .map(|hop| lndkrpc::BlindedHop {
                 blinded_node_id: Some(convert_public_key(hop.blinded_node_id)),

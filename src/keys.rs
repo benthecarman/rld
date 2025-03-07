@@ -1,16 +1,15 @@
 use crate::logger::RldLogger;
 use crate::onchain::OnChainWallet;
-use bdk::KeychainKind;
+use bdk_wallet::KeychainKind;
 use bitcoin::absolute::LockTime;
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{Network, ScriptBuf, Transaction, TxOut};
-use lightning::bech32::u5;
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
-use lightning::log_error;
+use lightning::log_trace;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
 use lightning::offers::invoice_request::UnsignedInvoiceRequest;
 use lightning::sign::{
@@ -18,6 +17,7 @@ use lightning::sign::{
     OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 use lightning::util::logger::Logger;
+use lightning_invoice::RawBolt11Invoice;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -65,11 +65,10 @@ impl KeysManager {
             let mut wallet = self.wallet.wallet.try_write().map_err(|_| ())?;
             // These often fail because we continually retry these. Use LastUnused so we don't generate a ton of new
             // addresses for no reason.
-            wallet
-                .next_unused_address(KeychainKind::Internal)
-                .map_err(|e| log_error!(self.logger, "Error getting internal address: {e}"))?
-                .address
+            wallet.next_unused_address(KeychainKind::Internal).address
         };
+
+        log_trace!(self.logger, "Spending spendable outputs to: {address}");
 
         self.inner.spend_spendable_outputs(
             descriptors,
@@ -108,11 +107,10 @@ impl NodeSigner for KeysManager {
 
     fn sign_invoice(
         &self,
-        hrp_bytes: &[u8],
-        invoice_data: &[u5],
+        invoice: &RawBolt11Invoice,
         recipient: Recipient,
     ) -> Result<RecoverableSignature, ()> {
-        self.inner.sign_invoice(hrp_bytes, invoice_data, recipient)
+        self.inner.sign_invoice(invoice, recipient)
     }
 
     fn sign_bolt12_invoice_request(
@@ -164,7 +162,6 @@ impl SignerProvider for KeysManager {
         let mut wallet = self.wallet.wallet.try_write().map_err(|_| ())?;
         Ok(wallet
             .next_unused_address(KeychainKind::External)
-            .map_err(|_| ())?
             .address
             .script_pubkey())
     }
@@ -173,7 +170,6 @@ impl SignerProvider for KeysManager {
         let mut wallet = self.wallet.wallet.try_write().map_err(|_| ())?;
         let script = wallet
             .next_unused_address(KeychainKind::External)
-            .map_err(|_| ())?
             .address
             .script_pubkey();
         ShutdownScript::try_from(script).map_err(|_| ())

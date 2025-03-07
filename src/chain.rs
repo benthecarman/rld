@@ -1,14 +1,12 @@
 use crate::logger::RldLogger;
 use crate::onchain::OnChainWallet;
-use bdk::chain::ConfirmationTime;
 use bitcoin::consensus::encode;
-use bitcoin::{Transaction, Txid};
+use bitcoin::Transaction;
 use bitcoincore_rpc::RpcApi;
 use lightning::chain::chaininterface::BroadcasterInterface;
 use lightning::log_error;
 use lightning::util::logger::Logger;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 #[derive(Clone)]
 pub struct TxBroadcaster {
@@ -36,34 +34,37 @@ impl TxBroadcaster {
 
 impl BroadcasterInterface for TxBroadcaster {
     fn broadcast_transactions(&self, txs: &[&Transaction]) {
-        // TODO: Rather than calling `sendrawtransaction` in a a loop, we should probably use
-        // `submitpackage` once it becomes available.
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let pos = ConfirmationTime::Unconfirmed { last_seen: now };
-        for tx in txs {
-            let tx_serialized = encode::serialize_hex(tx);
-            let tx_json = serde_json::json!(tx_serialized);
-            let bitcoind = self.rpc.clone();
-            let logger = Arc::clone(&self.logger);
-            // This may error due to RL calling `broadcast_transactions` with the same transaction
-            // multiple times, but the error is safe to ignore.
-            match bitcoind.call::<Txid>("sendrawtransaction", &[tx_json]) {
-                Ok(txid) => {
+        // encode txs to hex
+        let txn = txs
+            .iter()
+            .map(|tx| encode::serialize_hex(tx))
+            .collect::<Vec<_>>();
+
+        let tx_json: serde_json::Value;
+        let res = if txn.len() == 1 {
+            tx_json = serde_json::json!(txn[0]);
+            self.rpc
+                .call::<serde_json::Value>("sendrawtransaction", &[tx_json.clone()])
+        } else {
+            tx_json = serde_json::json!(txn);
+            self.rpc
+                .call::<serde_json::Value>("submitpackage", &[tx_json.clone()])
+        };
+        match res {
+            Ok(_) => {
+                for tx in txs {
                     let tx = tx.to_owned().clone();
-                    if let Err(e) = self.wallet.insert_tx(tx, pos, None) {
+                    let txid = tx.compute_txid();
+                    if let Err(e) = self.wallet.insert_tx(tx) {
                         log_error!(
-                            logger,
+                            self.logger,
                             "Failed to insert transaction {txid} into wallet: {e}"
                         );
                     }
                 }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    log_error!(logger, "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {err_str}\nTransaction: {tx_serialized}");
-                }
+            }
+            Err(e) => {
+                log_error!(self.logger, "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {e}\nTransactions: {tx_json}");
             }
         }
     }

@@ -2,15 +2,13 @@ use crate::fees::RldFeeEstimator;
 use crate::keys::coin_type_from_network;
 use crate::logger::RldLogger;
 use anyhow::anyhow;
-use bdk::chain::indexed_tx_graph::Indexer;
-use bdk::chain::{BlockId, ChainOracle, ConfirmationTime};
-use bdk::psbt::PsbtUtils;
-use bdk::template::DescriptorTemplateOut;
-use bdk::wallet::{AddressInfo, Balance};
-use bdk::{KeychainKind, LocalOutput, SignOptions, Wallet};
 use bdk_bitcoind_rpc::Emitter;
 use bdk_file_store::Store;
-use bitcoin::address::Payload;
+use bdk_wallet::chain::{BlockId, ChainOracle, ChainPosition, ConfirmationBlockTime, Indexer};
+use bdk_wallet::psbt::PsbtUtils;
+use bdk_wallet::template::DescriptorTemplateOut;
+use bdk_wallet::{AddressInfo, Balance, ChangeSet};
+use bdk_wallet::{KeychainKind, LocalOutput, PersistedWallet, SignOptions, Wallet};
 use bitcoin::bip32::{ChildNumber, DerivationPath, Xpriv};
 use bitcoin::psbt::Psbt;
 use bitcoin::{Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Transaction, TxOut, Txid};
@@ -42,12 +40,12 @@ pub struct TransactionDetails {
     /// Sum of owned inputs of this transaction.
     pub sent: Amount,
     /// Fee value in sats if it was available.
-    pub fee: Option<u64>,
+    pub fee: Option<Amount>,
     /// Fee Rate if it was available.
     pub fee_rate: Option<FeeRate>,
     /// If the transaction is confirmed, contains height and Unix timestamp of the block containing the
     /// transaction, unconfirmed transaction contains `None`.
-    pub confirmation_time: ConfirmationTime,
+    pub chain_position: ChainPosition<ConfirmationBlockTime>,
     /// Details of the outputs of the transaction
     pub previous_outpoints: Vec<PreviousOutpoint>,
     /// Details of the outputs of the transaction
@@ -80,7 +78,8 @@ pub struct OutputDetails {
 
 #[derive(Clone)]
 pub struct OnChainWallet {
-    pub(crate) wallet: Arc<RwLock<Wallet>>,
+    pub(crate) wallet: Arc<RwLock<PersistedWallet<Store<ChangeSet>>>>,
+    pub(crate) store: Arc<RwLock<Store<ChangeSet>>>,
     pub network: Network,
     pub fees: Arc<RldFeeEstimator>,
     stop: Arc<AtomicBool>,
@@ -99,29 +98,54 @@ impl OnChainWallet {
         let (receive_descriptor_template, change_descriptor_template) =
             get_tr_descriptors_for_extended_key(xprv, network)?;
 
-        log_info!(logger, "Loading wallet");
         let magic = format!("RLD-{network}");
-        let store = Store::open_or_create_new(magic.as_bytes(), data_dir)?;
-        let wallet = Wallet::new_or_load(
-            receive_descriptor_template,
-            Some(change_descriptor_template),
-            store,
-            network,
-        )?;
-        let wallet = Arc::new(RwLock::new(wallet));
-        log_debug!(logger, "Wallet loaded");
+        if data_dir.exists() {
+            log_info!(logger, "Loading wallet");
+            let mut store: Store<ChangeSet> = Store::open(magic.as_bytes(), data_dir)?;
+            let wallet = Wallet::load()
+                .check_network(network)
+                .descriptor(KeychainKind::External, Some(receive_descriptor_template))
+                .descriptor(KeychainKind::Internal, Some(change_descriptor_template))
+                .extract_keys()
+                .load_wallet(&mut store)?
+                .expect("failed to load wallet");
+            let wallet = Arc::new(RwLock::new(wallet));
+            let store = Arc::new(RwLock::new(store));
+            log_debug!(logger, "Wallet loaded");
 
-        Ok(Self {
-            wallet,
-            network,
-            fees,
-            stop,
-            logger,
-        })
+            Ok(Self {
+                wallet,
+                store,
+                network,
+                fees,
+                stop,
+                logger,
+            })
+        } else {
+            log_info!(logger, "Creating wallet");
+            let mut store: Store<ChangeSet> = Store::create_new(magic.as_bytes(), data_dir)?;
+            let wallet = Wallet::create(receive_descriptor_template, change_descriptor_template)
+                .network(network)
+                .create_wallet(&mut store)
+                .expect("failed to create wallet");
+            let wallet = Arc::new(RwLock::new(wallet));
+            let store = Arc::new(RwLock::new(store));
+            log_debug!(logger, "Wallet created");
+
+            Ok(Self {
+                wallet,
+                store,
+                network,
+                fees,
+                stop,
+                logger,
+            })
+        }
     }
 
     pub fn start(&self) {
         let wallet = self.wallet.clone();
+        let store = self.store.clone();
         let rpc = self.fees.rpc.clone();
         let stop = self.stop.clone();
         let logger = self.logger.clone();
@@ -170,7 +194,8 @@ impl OnChainWallet {
 
                     // Commit every 100 blocks
                     if blocks_received % 100 == 0 {
-                        wallet.commit().unwrap();
+                        let mut store = store.write().unwrap();
+                        wallet.persist(&mut store).unwrap();
                         // Check if we should stop
                         if stop.load(Ordering::Relaxed) {
                             return;
@@ -188,14 +213,17 @@ impl OnChainWallet {
                 // Commit the remaining blocks
                 {
                     let mut wallet = wallet.write().unwrap();
-                    wallet.commit().unwrap();
+                    let mut store = store.write().unwrap();
+                    wallet.persist(&mut store).unwrap();
                 }
 
                 if let Some(mempool) = emitter.mempool().ok().filter(|m| !m.is_empty()) {
                     let mut wallet = wallet.write().unwrap();
                     let start_apply_mempool = Instant::now();
-                    wallet.apply_unconfirmed_txs(mempool.iter().map(|(tx, time)| (tx, *time)));
-                    wallet.commit().unwrap();
+                    wallet.apply_unconfirmed_txs(
+                        mempool.iter().map(|(tx, time)| (tx.clone(), *time)),
+                    );
+                    // wallet.commit().unwrap();
                     log_info!(
                         logger,
                         "Applied unconfirmed transactions in {}s",
@@ -213,62 +241,38 @@ impl OnChainWallet {
     }
 
     pub fn broadcast_transaction(&self, tx: Transaction) -> anyhow::Result<Txid> {
-        let txid = tx.txid();
+        let txid = tx.compute_txid();
         log_info!(self.logger, "Broadcasting transaction: {txid}");
 
         if let Err(e) = self.fees.rpc.send_raw_transaction(&tx) {
             log_error!(self.logger, "Failed to broadcast transaction ({txid}): {e}");
             return Err(anyhow!("Failed to broadcast transaction ({txid}): {e}"));
-        } else if let Err(e) = self.insert_tx(
-            tx,
-            ConfirmationTime::Unconfirmed {
-                last_seen: SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)?
-                    .as_secs(),
-            },
-            None,
-        ) {
+        } else if let Err(e) = self.insert_tx(tx) {
             log_warn!(self.logger, "ERROR: Could not sync broadcasted tx ({txid}), will be synced in next iteration: {e:?}");
         }
 
         Ok(txid)
     }
 
-    pub(crate) fn insert_tx(
-        &self,
-        tx: Transaction,
-        position: ConfirmationTime,
-        block_id: Option<BlockId>,
-    ) -> anyhow::Result<()> {
-        let txid = tx.txid();
-        match position {
-            ConfirmationTime::Confirmed { .. } => {
-                // if the transaction is confirmed and we have the block id,
-                // we can insert it directly
-                if let Some(block_id) = block_id {
-                    let mut wallet = self.wallet.try_write().unwrap();
-                    wallet.insert_checkpoint(block_id)?;
-                    wallet.insert_tx(tx, position)?;
-                } else {
-                    return Ok(());
-                }
-            }
-            ConfirmationTime::Unconfirmed { .. } => {
-                // if the transaction is unconfirmed, we can just insert it
-                let mut wallet = self.wallet.try_write().unwrap();
+    pub(crate) fn insert_tx(&self, tx: Transaction) -> anyhow::Result<()> {
+        let txid = tx.compute_txid();
+        // if the transaction is unconfirmed, we can just insert it
+        let mut wallet = self.wallet.try_write().unwrap();
 
-                // if we already have the transaction, we don't need to insert it
-                if wallet.get_tx(txid).is_none() {
-                    // insert tx and commit changes
-                    wallet.insert_tx(tx, position)?;
-                    wallet.commit()?;
-                } else {
-                    log_debug!(
-                        self.logger,
-                        "Tried to insert already existing transaction ({txid})",
-                    )
-                }
-            }
+        // if we already have the transaction, we don't need to insert it
+        if wallet.get_tx(txid).is_none() {
+            let last_seen = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_secs();
+            // insert tx and commit changes
+            wallet.apply_unconfirmed_txs([(tx, last_seen)]);
+            let mut store = self.store.write().unwrap();
+            wallet.persist(&mut store).unwrap();
+        } else {
+            log_debug!(
+                self.logger,
+                "Tried to insert already existing transaction ({txid})",
+            )
         }
 
         Ok(())
@@ -276,7 +280,7 @@ impl OnChainWallet {
 
     pub fn balance(&self) -> Balance {
         let wallet = self.wallet.read().unwrap();
-        wallet.get_balance()
+        wallet.balance()
     }
 
     pub fn sync_height(&self) -> anyhow::Result<BlockId> {
@@ -286,14 +290,14 @@ impl OnChainWallet {
 
     pub fn get_new_address(&self) -> anyhow::Result<AddressInfo> {
         let mut wallet = self.wallet.write().unwrap();
-        let address = wallet.next_unused_address(KeychainKind::External)?;
+        let address = wallet.next_unused_address(KeychainKind::External);
 
         Ok(address)
     }
 
     pub fn get_change_address(&self) -> anyhow::Result<AddressInfo> {
         let mut wallet = self.wallet.write().unwrap();
-        let address = wallet.next_unused_address(KeychainKind::Internal)?;
+        let address = wallet.next_unused_address(KeychainKind::Internal);
 
         Ok(address)
     }
@@ -314,7 +318,7 @@ impl OnChainWallet {
     pub fn create_signed_psbt_to_spk(
         &self,
         spk: ScriptBuf,
-        amount: u64,
+        amount: Amount,
         fee_rate: Option<FeeRate>,
     ) -> anyhow::Result<Psbt> {
         let mut wallet = self.wallet.try_write().unwrap();
@@ -325,10 +329,7 @@ impl OnChainWallet {
         });
         let mut psbt = {
             let mut builder = wallet.build_tx();
-            builder
-                .add_recipient(spk, amount)
-                .enable_rbf()
-                .fee_rate(fee_rate);
+            builder.add_recipient(spk, amount).fee_rate(fee_rate);
             builder.finish()?
         };
         log_debug!(self.logger, "Unsigned PSBT: {psbt}");
@@ -339,13 +340,13 @@ impl OnChainWallet {
     pub fn send_to_address(
         &self,
         addr: Address,
-        amount: u64,
+        amount: Amount,
         fee_rate: Option<FeeRate>,
     ) -> anyhow::Result<Txid> {
         let psbt = self.create_signed_psbt_to_spk(addr.script_pubkey(), amount, fee_rate)?;
 
         let raw_transaction = psbt.extract_tx()?;
-        let txid = raw_transaction.txid();
+        let txid = raw_transaction.compute_txid();
 
         self.broadcast_transaction(raw_transaction)?;
         log_debug!(self.logger, "Transaction broadcast! TXID: {txid}");
@@ -369,7 +370,6 @@ impl OnChainWallet {
             builder
                 .drain_wallet() // Spend all outputs in this wallet.
                 .drain_to(spk)
-                .enable_rbf()
                 .fee_rate(fee_rate);
             builder.finish()?
         };
@@ -382,7 +382,7 @@ impl OnChainWallet {
         let psbt = self.create_sweep_psbt(addr.script_pubkey(), fee_rate)?;
 
         let raw_transaction = psbt.extract_tx()?;
-        let txid = raw_transaction.txid();
+        let txid = raw_transaction.compute_txid();
 
         self.broadcast_transaction(raw_transaction)?;
         log_debug!(self.logger, "Transaction broadcast! TXID: {txid}");
@@ -405,11 +405,10 @@ impl OnChainWallet {
             FeeRate::from_sat_per_kwu(sat_per_kwu as u64)
         });
         let mut builder = wallet.build_tx();
-        builder.enable_rbf();
         builder.fee_rate(fee_rate);
 
         for output in outputs {
-            builder.add_recipient(output.script_pubkey, output.value.to_sat());
+            builder.add_recipient(output.script_pubkey, output.value);
         }
 
         Ok(builder.finish()?)
@@ -419,7 +418,7 @@ impl OnChainWallet {
         &self,
         outputs: Vec<TxOut>,
         fee_rate: Option<FeeRate>,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<Amount> {
         let psbt = self.create_unsigned_psbt_to_outputs(outputs, fee_rate)?;
         psbt.fee_amount()
             .ok_or_else(|| anyhow!("Could not estimate fee"))
@@ -437,7 +436,7 @@ impl OnChainWallet {
         }
 
         let raw_transaction = psbt.extract_tx()?;
-        let txid = raw_transaction.txid();
+        let txid = raw_transaction.compute_txid();
 
         self.broadcast_transaction(raw_transaction)?;
         log_debug!(self.logger, "Transaction broadcast! TXID: {txid}");
@@ -478,15 +477,15 @@ impl OnChainWallet {
                             .enumerate()
                             .map(|(output_index, output)| {
                                 let script = output.script_pubkey.as_script();
-                                let address = Payload::from_script(script)
-                                    .ok()
-                                    .map(|p| Address::new(self.network, p).to_string());
+                                let address = Address::from_script(script, self.network)
+                                    .map(|a| a.to_string())
+                                    .ok();
                                 OutputDetails {
                                     address,
                                     spk: output.script_pubkey.clone(),
                                     output_index,
                                     amount: output.value,
-                                    is_our_address: wallet.is_mine(script),
+                                    is_our_address: wallet.is_mine(script.into()),
                                 }
                             })
                             .collect();
@@ -505,11 +504,11 @@ impl OnChainWallet {
                         Some(TransactionDetails {
                             transaction: tx.tx_node.tx.clone(),
                             txid: tx.tx_node.txid,
-                            received: Amount::from_sat(received),
-                            sent: Amount::from_sat(sent),
+                            received,
+                            sent,
                             fee,
                             fee_rate,
-                            confirmation_time: tx.chain_position.cloned().into(),
+                            chain_position: tx.chain_position,
                             previous_outpoints,
                             output_details,
                         })
@@ -553,15 +552,15 @@ impl OnChainWallet {
                     .enumerate()
                     .map(|(output_index, output)| {
                         let script = output.script_pubkey.as_script();
-                        let address = Payload::from_script(script)
-                            .ok()
-                            .map(|p| Address::new(self.network, p).to_string());
+                        let address = Address::from_script(script, self.network)
+                            .map(|a| a.to_string())
+                            .ok();
                         OutputDetails {
                             address,
                             spk: output.script_pubkey.clone(),
                             output_index,
                             amount: output.value,
-                            is_our_address: wallet.is_mine(script),
+                            is_our_address: wallet.is_mine(script.into()),
                         }
                     })
                     .collect();
@@ -578,11 +577,11 @@ impl OnChainWallet {
                 let details = TransactionDetails {
                     transaction: tx.tx_node.tx.to_owned(),
                     txid,
-                    received: Amount::from_sat(received),
-                    sent: Amount::from_sat(sent),
+                    received,
+                    sent,
                     fee,
                     fee_rate,
-                    confirmation_time: tx.chain_position.cloned().into(),
+                    chain_position: tx.chain_position,
                     previous_outpoints,
                     output_details,
                 };
@@ -610,9 +609,7 @@ impl WalletSource for OnChainWallet {
 
     fn get_change_script(&self) -> Result<ScriptBuf, ()> {
         let mut wallet = self.wallet.try_write().map_err(|_| ())?;
-        let addr = wallet
-            .next_unused_address(KeychainKind::Internal)
-            .map_err(|_| ())?;
+        let addr = wallet.next_unused_address(KeychainKind::Internal);
         Ok(addr.script_pubkey())
     }
 
@@ -650,11 +647,11 @@ fn get_tr_descriptors_for_extended_key(
         ChildNumber::from_hardened_idx(0)?, // account number
     ]);
 
-    let receive_descriptor_template = bdk::descriptor!(tr((
+    let receive_descriptor_template = bdk_wallet::descriptor!(tr((
         xprv,
         derivation_path.extend([ChildNumber::Normal { index: 0 }])
     )))?;
-    let change_descriptor_template = bdk::descriptor!(tr((
+    let change_descriptor_template = bdk_wallet::descriptor!(tr((
         xprv,
         derivation_path.extend([ChildNumber::Normal { index: 1 }])
     )))?;

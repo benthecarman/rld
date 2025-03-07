@@ -1,2 +1,2 @@
-test:
-    cargo test -- --test-threads=1
+test *args:
+    cargo test {{args}} -- --test-threads=1

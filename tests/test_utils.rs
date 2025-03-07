@@ -2,10 +2,8 @@ use bitcoin::bip32::Xpriv;
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::{Address, Amount, Network};
-use bitcoind::bitcoincore_rpc::bitcoincore_rpc_json::AddressType;
-use bitcoind::bitcoincore_rpc::RpcApi;
-use bitcoind::tempfile::tempdir;
-use bitcoind::{get_available_port, BitcoinD};
+use corepc_node::tempfile::tempdir;
+use corepc_node::{get_available_port, Node as BitcoinD};
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::PgConnection;
 use diesel_migrations::MigrationHarness;
@@ -31,11 +29,11 @@ lazy_static! {
     pub static ref BITCOIND: BitcoinD = {
         let bitcoind_exe = env::var("BITCOIND_EXE")
             .ok()
-            .or_else(|| bitcoind::downloaded_exe_path().ok())
+            .or_else(|| corepc_node::downloaded_exe_path().ok())
             .expect(
                 "you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
             );
-        let mut conf = bitcoind::Conf::default();
+        let mut conf = corepc_node::Conf::default();
         conf.args.push("-txindex");
         conf.args.push("-rpcworkqueue=100");
         BitcoinD::with_conf(bitcoind_exe, &conf).unwrap()
@@ -51,15 +49,8 @@ pub async fn generate_blocks_and_wait(num: usize) {
 }
 
 pub fn generate_blocks(num: usize) {
-    let address = BITCOIND
-        .client
-        .get_new_address(Some("test"), Some(AddressType::Bech32m))
-        .unwrap()
-        .assume_checked();
-    let _block_hashes = BITCOIND
-        .client
-        .generate_to_address(num as u64, &address)
-        .unwrap();
+    let address = BITCOIND.client.new_address().unwrap();
+    let _block_hashes = BITCOIND.client.generate_to_address(num, &address).unwrap();
 }
 
 pub async fn create_rld() -> Node {
@@ -148,18 +139,10 @@ pub async fn create_lnd() -> Lnd {
         .unwrap();
     let lnd_address = Address::from_str(&lnd_address.into_inner().address).unwrap();
 
+    let amt = 100_000_000;
     BITCOIND
         .client
-        .send_to_address(
-            &lnd_address.assume_checked(),
-            Amount::from_sat(100_000_000),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .send_to_address(&lnd_address.assume_checked(), Amount::from_sat(amt))
         .unwrap();
 
     generate_blocks_and_wait(1).await;
@@ -171,7 +154,7 @@ pub async fn create_lnd() -> Lnd {
             .await
             .unwrap();
         let balance = balance.into_inner();
-        if balance.confirmed_balance >= 100_000_000 {
+        if balance.confirmed_balance >= amt as i64 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -213,25 +196,17 @@ pub async fn get_lnd_connection_info(lnd: &mut Lnd) -> PubkeyConnectionInfo {
 pub async fn fund_rld(rld: &Node) {
     let address = rld.wallet.get_new_address().unwrap();
 
+    let amt = Amount::from_sat(100_000_000);
     BITCOIND
         .client
-        .send_to_address(
-            &address.address,
-            Amount::from_sat(100_000_000),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        .send_to_address(&address.address, amt)
         .unwrap();
 
     generate_blocks_and_wait(6).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let balance = rld.wallet.balance();
-    assert_eq!(balance.confirmed, 100_000_000);
+    assert_eq!(balance.confirmed, amt);
 }
 
 pub async fn open_channel_from_rld(node: &Node, lnd: &mut Lnd) {
@@ -253,14 +228,20 @@ pub async fn open_channel_from_rld(node: &Node, lnd: &mut Lnd) {
         .await
         .unwrap();
 
-    generate_blocks_and_wait(6).await;
+    let blocks = 6;
+    generate_blocks_and_wait(blocks).await;
 
     // wait for channel to be usable
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
     wait_for_lnd_sync(lnd).await;
 
     let chans = node.channel_manager.list_channels();
     assert_eq!(chans.len(), 1);
+    assert!(chans[0].is_outbound);
+    assert!(chans[0].confirmations_required.unwrap() <= blocks as u32);
+    println!("{}", chans[0].confirmations.unwrap());
+    assert!(chans[0].confirmations.unwrap() >= chans[0].confirmations_required.unwrap());
+    assert!(chans[0].is_channel_ready);
     assert!(chans[0].is_usable);
     assert!(chans[0]
         .clone()
@@ -277,6 +258,8 @@ pub async fn open_channel_from_lnd(node: &Node, lnd: &mut Lnd) {
 
     // wait for stable connection
     tokio::time::sleep(Duration::from_millis(250)).await;
+
+    wait_for_lnd_sync(lnd).await;
 
     let node_id = node.node_id();
     let lightning = lnd.client.lightning();

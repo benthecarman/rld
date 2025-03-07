@@ -19,7 +19,7 @@ use bitcoin::constants::ChainHash;
 use bitcoin::hashes::{sha256::Hash as Sha256Hash, Hash};
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
-use bitcoin::secp256k1::{All, PublicKey, Secp256k1, ThirtyTwoByteHash};
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Network, OutPoint};
 use bitcoincore_rpc::{Auth, RpcApi};
 use diesel::r2d2::{ConnectionManager, Pool};
@@ -28,15 +28,22 @@ use lightning::blinded_path::EmptyNodeIdLookUp;
 use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
+use lightning::ln::bolt11_payment::{
+    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
+};
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
     ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId,
     RecipientOnionFields, Retry,
 };
+use lightning::ln::invoice_utils::{
+    create_invoice_from_channelmanager, create_invoice_from_channelmanager_with_description_hash,
+};
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
 };
-use lightning::ln::{ChannelId, PaymentHash, PaymentPreimage, PaymentSecret};
+use lightning::ln::types::ChannelId;
+use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::offers::offer::{Amount, Offer};
 use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
@@ -55,12 +62,6 @@ use lightning::{log_debug, log_error, log_info};
 use lightning_background_processor::{process_events_async, GossipSync};
 use lightning_block_sync::http::HttpEndpoint;
 use lightning_block_sync::{init, poll, SpvClient, UnboundedCache};
-use lightning_invoice::payment::{
-    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
-};
-use lightning_invoice::utils::{
-    create_invoice_from_channelmanager, create_invoice_from_channelmanager_with_description_hash,
-};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription};
 use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::fs_store::FilesystemStore;
@@ -142,6 +143,8 @@ type ChainMonitor = chainmonitor::ChainMonitor<
             Arc<RldLogger>,
             Arc<KeysManager>,
             Arc<KeysManager>,
+            Arc<TxBroadcaster>,
+            Arc<RldFeeEstimator>,
         >,
     >,
 >;
@@ -232,10 +235,9 @@ pub struct Node {
     pub wallet: Arc<OnChainWallet>,
     pub(crate) bitcoind: Arc<bitcoincore_rpc::Client>,
     pub logger: Arc<RldLogger>,
-    pub(crate) secp: Secp256k1<All>,
     pub(crate) db_pool: Pool<ConnectionManager<PgConnection>>,
     pub(crate) stop_listen_connect: Arc<AtomicBool>,
-    background_processor: tokio::sync::watch::Receiver<Result<(), std::io::Error>>,
+    background_processor: tokio::sync::watch::Receiver<Result<(), bitcoin::io::Error>>,
     bp_exit: Arc<tokio::sync::watch::Sender<()>>,
     pub(crate) channel_acceptor: Arc<tokio::sync::RwLock<Option<ChannelAcceptor>>>,
 
@@ -309,6 +311,8 @@ impl Node {
             1_000,
             Arc::clone(&keys_manager),
             Arc::clone(&keys_manager),
+            Arc::clone(&broadcaster),
+            Arc::clone(&fee_estimator),
         ));
 
         let chain_monitor: Arc<ChainMonitor> = Arc::new(ChainMonitor::new(
@@ -319,8 +323,7 @@ impl Node {
             Arc::clone(&persister),
         ));
 
-        let mut channel_monitors =
-            persister.read_all_channel_monitors_with_updates(&broadcaster, &fee_estimator)?;
+        let mut channel_monitors = persister.read_all_channel_monitors_with_updates()?;
 
         let auth = base64::encode(format!(
             "{}:{}",
@@ -661,7 +664,11 @@ impl Node {
                 // Don't bother trying to announce if we don't have any public channels, though our
                 // peers should drop such an announcement anyway. Note that announcement may not
                 // propagate until we have a channel with 6+ confirmations.
-                if chan_man.list_channels().iter().any(|chan| chan.is_public) {
+                if chan_man
+                    .list_channels()
+                    .iter()
+                    .any(|chan| chan.is_announced)
+                {
                     peer_man.broadcast_node_announcement([0; 3], alias, list_addresses.clone());
                 }
             }
@@ -774,7 +781,6 @@ impl Node {
             bitcoind,
             logger,
             db_pool,
-            secp: Secp256k1::new(),
             stop_listen_connect: stop,
             background_processor: bp_rx,
             bp_exit: Arc::new(bp_exit),
@@ -836,11 +842,11 @@ impl Node {
     pub fn get_balance(&self) -> Balance {
         let wallet_balance = self.wallet.balance();
 
-        let lightning_msats: u64 = self
-            .channel_manager
-            .list_channels()
+        let lightning_sats: u64 = self
+            .chain_monitor
+            .get_claimable_balances(&[])
             .iter()
-            .map(|c| c.balance_msat)
+            .map(|c| c.claimable_amount_satoshis())
             .sum();
 
         // get the amount in limbo from force closes
@@ -854,9 +860,10 @@ impl Node {
             .sum();
 
         Balance {
-            confirmed: wallet_balance.confirmed,
-            unconfirmed: wallet_balance.untrusted_pending + wallet_balance.trusted_pending,
-            lightning: lightning_msats / 1_000,
+            confirmed: wallet_balance.confirmed.to_sat(),
+            unconfirmed: (wallet_balance.untrusted_pending + wallet_balance.trusted_pending)
+                .to_sat(),
+            lightning: lightning_sats - force_close,
             force_close,
         }
     }
@@ -1101,7 +1108,7 @@ impl Node {
                 .map_err(|_| anyhow::anyhow!("Invalid custom TLVs"))?
         };
 
-        let payment_id = PaymentId(payment_hash.into_32());
+        let payment_id = PaymentId(payment_hash.to_byte_array());
         let payment_hash = self
             .channel_manager
             .send_spontaneous_payment_with_retry(
@@ -1270,7 +1277,7 @@ impl Node {
 
         // check we have enough balance
         let wallet_balance = self.wallet.balance();
-        if wallet_balance.trusted_spendable() <= amount_sat {
+        if wallet_balance.trusted_spendable() <= bitcoin::Amount::from_sat(amount_sat) {
             return Err(anyhow!("Not enough balance"));
         }
 
@@ -1295,7 +1302,7 @@ impl Node {
 
         let user_channel_id: u128 = params.id.try_into()?;
         let mut config = default_user_config();
-        config.channel_handshake_config.announced_channel = !private;
+        config.channel_handshake_config.announce_for_forwarding = !private;
         match self.channel_manager.create_channel(
             pubkey,
             amount_sat,
@@ -1345,7 +1352,7 @@ fn default_user_config() -> UserConfig {
         channel_handshake_config: ChannelHandshakeConfig {
             negotiate_scid_privacy: true,
             negotiate_anchors_zero_fee_htlc_tx: true,
-            announced_channel: false,
+            announce_for_forwarding: false,
             ..Default::default()
         },
         channel_handshake_limits: ChannelHandshakeLimits {
