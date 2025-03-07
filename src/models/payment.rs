@@ -3,6 +3,7 @@ use bitcoin::secp256k1::PublicKey;
 use diesel::prelude::*;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::offers::invoice::Bolt12Invoice;
+use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{BlindedTail, Path, RouteHop};
 use lightning::types::payment::PaymentHash;
 use lightning::util::ser::{Readable, Writeable};
@@ -102,11 +103,10 @@ impl Payment {
         self.fee_msats
     }
 
-    // todo might be better to have as a NodeId
-    pub fn destination_pubkey(&self) -> Option<PublicKey> {
+    pub fn destination_pubkey(&self) -> Option<NodeId> {
         self.destination_pubkey
             .as_ref()
-            .map(|d| PublicKey::from_slice(d).expect("invalid pubkey"))
+            .map(|d| NodeId::from_slice(d).expect("invalid pubkey"))
     }
 
     pub fn bolt11(&self) -> Option<Bolt11Invoice> {
