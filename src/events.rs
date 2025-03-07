@@ -785,7 +785,6 @@ impl EventHandler {
                     .channel_manager
                     .send_payment_for_bolt12_invoice(&invoice, context.as_ref());
 
-                // fixme: https://github.com/lightningdevkit/rust-lightning/issues/3653
                 match res {
                     Ok(_) => Ok(()),
                     Err(Bolt12PaymentError::DuplicateInvoice) => {
