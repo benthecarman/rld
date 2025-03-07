@@ -76,20 +76,22 @@ use lightning::blinded_path::{Direction, IntroductionNode};
 use lightning::events::bump_transaction::WalletSource;
 use lightning::events::PathFailure;
 use lightning::ln::bolt11_payment::{
-    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
+    payment_parameters_from_invoice, payment_parameters_from_variable_amount_invoice,
 };
 use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::types::ChannelId;
-use lightning::ln::PaymentPreimage;
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::offers::offer::Offer;
 use lightning::routing::router::{PaymentParameters, RouteParameters, Router};
 use lightning::sign::{EntropySource, NodeSigner, Recipient};
+use lightning::types::payment::PaymentPreimage;
 use lightning::util::config::MaxDustHTLCExposure;
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
 use lightning::{log_error, log_info, log_trace};
-use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
+use lightning_invoice::{
+    Bolt11Invoice, Bolt11InvoiceDescription, Bolt11InvoiceDescriptionRef, Description,
+};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -137,25 +139,25 @@ impl Lightning for Node {
         let balance = channels
             .iter()
             .filter(|c| c.is_channel_ready)
-            .map(|c| c.balance_msat)
+            .map(|c| c.outbound_capacity_msat)
             .sum::<u64>();
 
         let remote_balance = channels
             .iter()
             .filter(|c| c.is_channel_ready)
-            .map(|c| c.channel_value_satoshis - (c.balance_msat / 1000))
+            .map(|c| c.channel_value_satoshis - (c.outbound_capacity_msat / 1000))
             .sum::<u64>();
 
         let pending_open_balance = channels
             .iter()
             .filter(|c| !c.is_channel_ready)
-            .map(|c| c.balance_msat)
+            .map(|c| c.outbound_capacity_msat)
             .sum::<u64>();
 
         let pending_remote_balance = channels
             .iter()
             .filter(|c| !c.is_channel_ready)
-            .map(|c| c.channel_value_satoshis - (c.balance_msat / 1000))
+            .map(|c| c.channel_value_satoshis - (c.outbound_capacity_msat / 1000))
             .sum::<u64>();
 
         let local_balance = Amount {
@@ -745,7 +747,7 @@ impl Lightning for Node {
         let limbo: u64 = channels
             .iter()
             .filter(|c| !c.is_channel_ready)
-            .map(|c| c.balance_msat)
+            .map(|c| c.outbound_capacity_msat)
             .sum();
         let pending_open_channels = channels
             .into_iter()
@@ -777,8 +779,9 @@ impl Lightning for Node {
                         remote_node_pub: c.counterparty.node_id.to_string(),
                         channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
                         capacity: c.channel_value_satoshis as i64,
-                        local_balance: (c.balance_msat / 1_000) as i64,
-                        remote_balance: (c.channel_value_satoshis - (c.balance_msat / 1_000))
+                        local_balance: (c.outbound_capacity_msat / 1_000) as i64,
+                        remote_balance: (c.channel_value_satoshis
+                            - (c.outbound_capacity_msat / 1_000))
                             as i64,
                         local_chan_reserve_sat: c.unspendable_punishment_reserve.unwrap_or_default()
                             as i64,
@@ -845,8 +848,9 @@ impl Lightning for Node {
                     channel_point: c.funding_txo.map(|t| t.to_string()).unwrap_or_default(),
                     chan_id: c.short_channel_id.unwrap_or_default(),
                     capacity: c.channel_value_satoshis as i64,
-                    local_balance: c.balance_msat as i64 / 1_000,
-                    remote_balance: (c.channel_value_satoshis - (c.balance_msat / 1_000)) as i64,
+                    local_balance: c.outbound_capacity_msat as i64 / 1_000,
+                    remote_balance: (c.channel_value_satoshis - (c.outbound_capacity_msat / 1_000))
+                        as i64,
                     commit_fee: 0,
                     commit_weight: 0,
                     fee_per_kw: c.feerate_sat_per_1000_weight.unwrap_or_default() as i64,
@@ -1396,7 +1400,7 @@ impl Lightning for Node {
             };
 
             (
-                lightning::ln::PaymentHash(payment_hash.to_byte_array()),
+                lightning::types::payment::PaymentHash(payment_hash.to_byte_array()),
                 onion,
                 route_params,
                 pk,
@@ -1419,7 +1423,7 @@ impl Lightning for Node {
             let (hash, onion, route_params) = match invoice.amount_milli_satoshis() {
                 Some(_) => payment_parameters_from_invoice(invoice).expect("already checked"),
                 None => match amount_msats {
-                    Some(msats) => payment_parameters_from_zero_amount_invoice(invoice, msats)
+                    Some(msats) => payment_parameters_from_variable_amount_invoice(invoice, msats)
                         .expect("already checked"),
                     None => {
                         return Err(Status::invalid_argument("Amount missing from request"));
@@ -1747,7 +1751,7 @@ impl Lightning for Node {
         let CreatedInvoice { id, bolt11 } = if req.description_hash.is_empty() {
             let desc =
                 Description::new(req.memo).map_err(|e| Status::invalid_argument(e.to_string()))?;
-            let desc = Bolt11InvoiceDescription::Direct(&desc);
+            let desc = Bolt11InvoiceDescription::Direct(desc);
 
             self.create_invoice(desc, msats, expiry)
                 .map_err(|e| Status::internal(e.to_string()))?
@@ -1755,7 +1759,7 @@ impl Lightning for Node {
             let hash = Sha256::from_slice(&req.description_hash)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
             let hash = lightning_invoice::Sha256(hash);
-            let desc = Bolt11InvoiceDescription::Hash(&hash);
+            let desc = Bolt11InvoiceDescription::Hash(hash);
 
             self.create_invoice(desc, msats, expiry)
                 .map_err(|e| Status::internal(e.to_string()))?
@@ -1864,8 +1868,8 @@ impl Lightning for Node {
             .map_err(|e| Status::invalid_argument(format!("{:?}", e)))?;
 
         let (description, description_hash) = match invoice.description() {
-            Bolt11InvoiceDescription::Direct(desc) => (desc.to_string(), String::new()),
-            Bolt11InvoiceDescription::Hash(hash) => (String::new(), hash.0.to_string()),
+            Bolt11InvoiceDescriptionRef::Direct(desc) => (desc.to_string(), String::new()),
+            Bolt11InvoiceDescriptionRef::Hash(hash) => (String::new(), hash.0.to_string()),
         };
 
         let route_hints = invoice
@@ -2373,7 +2377,7 @@ impl Invoices for Node {
     ) -> Result<Response<CancelInvoiceResp>, Status> {
         let req = request.into_inner();
 
-        let payment_hash = lightning::ln::PaymentHash(
+        let payment_hash = lightning::types::payment::PaymentHash(
             req.payment_hash
                 .try_into()
                 .map_err(|_| Status::internal("Invalid payment hash"))?,
@@ -2404,7 +2408,7 @@ impl Invoices for Node {
     ) -> Result<Response<SettleInvoiceResp>, Status> {
         let req = request.into_inner();
 
-        let preimage = lightning::ln::PaymentPreimage(
+        let preimage = lightning::types::payment::PaymentPreimage(
             req.preimage
                 .try_into()
                 .map_err(|_| Status::internal("Invalid payment hash"))?,
@@ -2494,7 +2498,7 @@ impl routerrpc::router_server::Router for Node {
             };
 
             (
-                lightning::ln::PaymentHash(payment_hash.to_byte_array()),
+                lightning::types::payment::PaymentHash(payment_hash.to_byte_array()),
                 onion,
                 route_params,
                 pk,
@@ -2517,7 +2521,7 @@ impl routerrpc::router_server::Router for Node {
             let (hash, onion, route_params) = match invoice.amount_milli_satoshis() {
                 Some(_) => payment_parameters_from_invoice(invoice).expect("already checked"),
                 None => match amount_msats {
-                    Some(msats) => payment_parameters_from_zero_amount_invoice(invoice, msats)
+                    Some(msats) => payment_parameters_from_variable_amount_invoice(invoice, msats)
                         .expect("already checked"),
                     None => {
                         return Err(Status::invalid_argument("Amount missing from request"));
@@ -3445,8 +3449,8 @@ fn receive_to_lnrpc_invoice(invoice: Receive) -> Invoice {
     };
 
     let (memo, description_hash) = match bolt11.as_ref().map(|b| b.description()) {
-        Some(Bolt11InvoiceDescription::Direct(desc)) => (desc.to_string(), vec![]),
-        Some(Bolt11InvoiceDescription::Hash(hash)) => {
+        Some(Bolt11InvoiceDescriptionRef::Direct(desc)) => (desc.to_string(), vec![]),
+        Some(Bolt11InvoiceDescriptionRef::Hash(hash)) => {
             (String::new(), hash.0.to_byte_array().to_vec())
         }
         None => (String::new(), vec![]),

@@ -29,21 +29,17 @@ use lightning::chain::{chainmonitor, ChannelMonitorUpdateStatus, Filter, Watch};
 use lightning::events::bump_transaction::{BumpTransactionEventHandler, Wallet};
 use lightning::events::Event;
 use lightning::ln::bolt11_payment::{
-    payment_parameters_from_invoice, payment_parameters_from_zero_amount_invoice,
+    payment_parameters_from_invoice, payment_parameters_from_variable_amount_invoice,
 };
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{
-    ChainParameters, ChannelManager as LdkChannelManager, ChannelManagerReadArgs, PaymentId,
-    RecipientOnionFields, Retry,
-};
-use lightning::ln::invoice_utils::{
-    create_invoice_from_channelmanager, create_invoice_from_channelmanager_with_description_hash,
+    Bolt11InvoiceParameters, ChainParameters, ChannelManager as LdkChannelManager,
+    ChannelManagerReadArgs, PaymentId, RecipientOnionFields, Retry,
 };
 use lightning::ln::peer_handler::{
     IgnoringMessageHandler, MessageHandler, PeerManager as LdkPeerManager,
 };
 use lightning::ln::types::ChannelId;
-use lightning::ln::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::offers::offer::{Amount, Offer};
 use lightning::onion_message::messenger::DefaultMessageRouter;
 use lightning::routing::gossip;
@@ -51,6 +47,7 @@ use lightning::routing::gossip::P2PGossipSync;
 use lightning::routing::router::{DefaultRouter, PaymentParameters, RouteParameters};
 use lightning::routing::scoring::{ProbabilisticScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::{EntropySource, InMemorySigner, NodeSigner, Recipient};
+use lightning::types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning::util::config::{
     ChannelConfig, ChannelHandshakeConfig, ChannelHandshakeLimits, UserConfig,
 };
@@ -91,7 +88,7 @@ pub(crate) type GossipVerifier = lightning_block_sync::gossip::GossipVerifier<
 pub(crate) type PeerManager = LdkPeerManager<
     SocketDescriptor,
     Arc<ChannelManager>,
-    Arc<P2PGossipSync<Arc<NetworkGraph>, GossipVerifier, Arc<RldLogger>>>,
+    Arc<P2PGossipSync<Arc<NetworkGraph>, Arc<GossipVerifier>, Arc<RldLogger>>>,
     Arc<OnionMessenger>,
     Arc<RldLogger>,
     IgnoringMessageHandler,
@@ -105,6 +102,7 @@ type OnionMessenger = lightning::onion_message::messenger::OnionMessenger<
     Arc<EmptyNodeIdLookUp>,
     Arc<DefaultMessageRouter<Arc<NetworkGraph>, Arc<RldLogger>, Arc<KeysManager>>>,
     Arc<ChannelManager>,
+    IgnoringMessageHandler,
     IgnoringMessageHandler,
     IgnoringMessageHandler,
 >;
@@ -128,6 +126,7 @@ pub(crate) type ChannelManager = LdkChannelManager<
     Arc<KeysManager>,
     Arc<RldFeeEstimator>,
     Arc<Router>,
+    Arc<DefaultMessageRouter<Arc<NetworkGraph>, Arc<RldLogger>, Arc<KeysManager>>>,
     Arc<RldLogger>,
 >;
 
@@ -331,7 +330,7 @@ impl Node {
         ));
         let endpoint =
             HttpEndpoint::for_host(config.bitcoind_host.clone()).with_port(config.bitcoind_port);
-        let block_source = Arc::new(lightning_block_sync::rpc::RpcClient::new(&auth, endpoint)?);
+        let block_source = Arc::new(lightning_block_sync::rpc::RpcClient::new(&auth, endpoint));
 
         // Step 8: Poll for the best chain tip, which may be used by the channel manager & spv client
         let polled_chain_tip = init::validate_best_block_header(block_source.as_ref())
@@ -372,12 +371,17 @@ impl Node {
             scoring_fee_params,
         ));
 
+        let message_router = Arc::new(DefaultMessageRouter::new(
+            network_graph.clone(),
+            keys_manager.clone(),
+        ));
+
         // Step 11: Initialize the ChannelManager
         let mut restarting_node = true;
         let (channel_manager_block_hash, channel_manager) = {
             if let Ok(mut f) = fs::File::open(ldk_data_dir.join("manager")) {
                 let mut channel_monitor_mut_references = Vec::with_capacity(channel_monitors.len());
-                for (_, channel_monitor) in channel_monitors.iter_mut() {
+                for (_, channel_monitor) in channel_monitors.iter() {
                     channel_monitor_mut_references.push(channel_monitor);
                 }
                 let read_args = ChannelManagerReadArgs::new(
@@ -388,6 +392,7 @@ impl Node {
                     chain_monitor.clone(),
                     broadcaster.clone(),
                     router.clone(),
+                    message_router.clone(),
                     logger.clone(),
                     default_user_config(),
                     channel_monitor_mut_references,
@@ -412,6 +417,7 @@ impl Node {
                     chain_monitor.clone(),
                     broadcaster.clone(),
                     router.clone(),
+                    message_router.clone(),
                     logger.clone(),
                     keys_manager.clone(),
                     keys_manager.clone(),
@@ -485,11 +491,9 @@ impl Node {
             Arc::clone(&keys_manager),
             Arc::clone(&logger),
             Arc::new(EmptyNodeIdLookUp {}),
-            Arc::new(DefaultMessageRouter::new(
-                network_graph.clone(),
-                keys_manager.clone(),
-            )),
+            message_router,
             Arc::clone(&channel_manager),
+            IgnoringMessageHandler {},
             IgnoringMessageHandler {},
             IgnoringMessageHandler {},
         ));
@@ -513,12 +517,12 @@ impl Node {
         ));
 
         // Install a GossipVerifier in the P2PGossipSync
-        let utxo_lookup = GossipVerifier::new(
+        let utxo_lookup = Arc::new(GossipVerifier::new(
             Arc::clone(&block_source),
             lightning_block_sync::gossip::TokioSpawner,
-            Arc::clone(&gossip_sync),
+            gossip_sync.clone(),
             Arc::clone(&peer_manager),
-        );
+        ));
         gossip_sync.add_utxo_lookup(Some(utxo_lookup));
 
         // ## Running LDK
@@ -874,37 +878,27 @@ impl Node {
         Ok(recvs)
     }
 
+    pub fn list_payments(&self) -> anyhow::Result<Vec<Payment>> {
+        let mut conn = self.db_pool.get()?;
+        let payments = Payment::list_payments(&mut conn)?;
+        Ok(payments)
+    }
+
     pub fn create_invoice(
         &self,
         description: Bolt11InvoiceDescription,
         msats: Option<u64>,
         expiry: Option<u32>,
     ) -> anyhow::Result<CreatedInvoice> {
-        let result = match description {
-            Bolt11InvoiceDescription::Direct(desc) => create_invoice_from_channelmanager(
-                &self.channel_manager,
-                self.keys_manager.clone(),
-                self.logger.clone(),
-                self.network.into(),
-                msats,
-                desc.to_string(),
-                expiry.unwrap_or(86_400),
-                None,
-            ),
-            Bolt11InvoiceDescription::Hash(hash) => {
-                create_invoice_from_channelmanager_with_description_hash(
-                    &self.channel_manager,
-                    self.keys_manager.clone(),
-                    self.logger.clone(),
-                    self.network.into(),
-                    msats,
-                    hash.clone(),
-                    expiry.unwrap_or(86_400),
-                    None,
-                )
-            }
-        };
-
+        let result = self
+            .channel_manager
+            .create_bolt11_invoice(Bolt11InvoiceParameters {
+                amount_msats: msats,
+                description,
+                invoice_expiry_delta_secs: expiry,
+                min_final_cltv_expiry_delta: None,
+                payment_hash: None,
+            });
         let invoice = result.map_err(|e| anyhow!("Failed to create invoice: {e}"))?;
 
         let mut conn = self.db_pool.get()?;
@@ -983,7 +977,7 @@ impl Node {
         let (hash, onion, route_params) = match invoice.amount_milli_satoshis() {
             Some(_) => payment_parameters_from_invoice(&invoice).expect("already checked"),
             None => match amount_msats {
-                Some(msats) => payment_parameters_from_zero_amount_invoice(&invoice, msats)
+                Some(msats) => payment_parameters_from_variable_amount_invoice(&invoice, msats)
                     .expect("already checked"),
                 None => return Err(anyhow!("No amount provided")),
             },
@@ -1054,7 +1048,8 @@ impl Node {
             (None, None) => return Err(anyhow!("No amount provided")),
         };
 
-        let payment_id = PaymentId(offer.id().0);
+        let random_bytes = self.keys_manager.get_secure_random_bytes();
+        let payment_id = PaymentId(random_bytes);
         self.channel_manager
             .pay_for_offer(
                 &offer,
@@ -1111,7 +1106,7 @@ impl Node {
         let payment_id = PaymentId(payment_hash.to_byte_array());
         let payment_hash = self
             .channel_manager
-            .send_spontaneous_payment_with_retry(
+            .send_spontaneous_payment(
                 Some(preimage),
                 recipient_onion,
                 payment_id,
@@ -1367,7 +1362,6 @@ fn default_user_config() -> UserConfig {
         accept_forwards_to_priv_channels: true,
         accept_inbound_channels: true,
         manually_accept_inbound_channels: true,
-        accept_mpp_keysend: true,
         manually_handle_bolt12_invoices: true,
         ..Default::default()
     }

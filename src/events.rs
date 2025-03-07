@@ -17,11 +17,13 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::Amount;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::{Connection, PgConnection};
-use lightning::events::{ClosureReason, Event, PathFailure, PaymentPurpose, ReplayEvent};
-use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::{PaymentHash, PaymentPreimage};
+use lightning::events::{
+    ClosureReason, Event, InboundChannelFunds, PathFailure, PaymentPurpose, ReplayEvent,
+};
+use lightning::ln::channelmanager::{Bolt12PaymentError, PaymentId};
 use lightning::routing::router::Path;
 use lightning::sign::{EntropySource, SpendableOutputDescriptor};
+use lightning::types::payment::{PaymentHash, PaymentPreimage};
 use lightning::util::logger::Logger;
 use lightning::util::ser::Writeable;
 use lightning::{log_debug, log_error, log_info, log_trace};
@@ -31,6 +33,7 @@ use tokio::sync::broadcast::Sender;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum PaymentAttempt {
     Successful {
         /// The `payment_id` passed to [`ChannelManager::send_payment`].
@@ -203,8 +206,9 @@ impl EventHandler {
                 via_channel_id: _,
                 via_user_channel_id: _,
                 claim_deadline: _,
+                payment_id,
             } => {
-                log_debug!(self.logger, "EVENT: PaymentReceived received payment from payment hash {payment_hash} of {amount_msat} msats to {receiver_node_id:?}");
+                log_debug!(self.logger, "EVENT: PaymentReceived received payment from payment hash {payment_hash} of {amount_msat} msats to {receiver_node_id:?} with id {payment_id:?}");
 
                 let mut conn = self.db_pool.get()?;
                 let receive = Receive::find_by_payment_hash(&mut conn, &payment_hash.0)?;
@@ -241,10 +245,11 @@ impl EventHandler {
                 htlcs,
                 sender_intended_total_msat: _,
                 onion_fields: _, // todo
+                payment_id,
             } => {
                 log_debug!(
                     self.logger,
-                    "EVENT: PaymentClaimed payment hash {payment_hash} of {amount_msat} msats"
+                    "EVENT: PaymentClaimed payment hash {payment_hash} of {amount_msat} msats with id {payment_id:?}"
                 );
 
                 let mut conn = self.db_pool.get()?;
@@ -472,6 +477,8 @@ impl EventHandler {
                 next_channel_id,
                 prev_user_channel_id: _,
                 next_user_channel_id: _,
+                prev_node_id,
+                next_node_id,
                 total_fee_earned_msat,
                 skimmed_fee_msat: _,
                 claim_from_onchain_tx,
@@ -499,7 +506,7 @@ impl EventHandler {
                     .and_then(|c| c.short_channel_id)
                     .ok_or(anyhow!("Could not find next channel"))?;
 
-                log_debug!(self.logger, "EVENT: PaymentForwarded, prev_channel_id: {prev_channel_id:?}, next_channel_id: {next_channel_id:?}, total_fee_earned_msat: {total_fee_earned_msat:?}, outbound_amount_forwarded_msat: {outbound_amount_forwarded_msat:?}");
+                log_debug!(self.logger, "EVENT: PaymentForwarded, prev_channel_id: {prev_channel_id:?}, next_channel_id: {next_channel_id:?}, total_fee_earned_msat: {total_fee_earned_msat:?}, outbound_amount_forwarded_msat: {outbound_amount_forwarded_msat:?}, prev_node_id: {prev_node_id:?}, next_node_id: {next_node_id:?}");
 
                 let mut conn = self.db_pool.get()?;
                 RoutedPayment::create(
@@ -562,6 +569,7 @@ impl EventHandler {
                 counterparty_node_id: node_id,
                 channel_capacity_sats,
                 channel_funding_txo,
+                last_local_balance_msat: _, // todo
             } => {
                 // if we still have channel open params, then it was just a failed channel open
                 // we should not persist this as a closed channel and just delete the channel open params
@@ -610,9 +618,9 @@ impl EventHandler {
                 temporary_channel_id,
                 counterparty_node_id,
                 funding_satoshis,
-                push_msat,
+                channel_negotiation_type,
                 channel_type: _,
-                is_announced: _,
+                is_announced,
                 params,
             } => {
                 log_debug!(
@@ -622,6 +630,11 @@ impl EventHandler {
 
                 // todo get zero conf peers from config
                 let mut trust_zero_conf = false;
+
+                let push_msat = match channel_negotiation_type {
+                    InboundChannelFunds::PushMsat(msat) => msat,
+                    InboundChannelFunds::DualFunded => 0,
+                };
 
                 let lock = self.channel_acceptor.read().await;
 
@@ -714,7 +727,7 @@ impl EventHandler {
                     counterparty_node_id.encode(),
                     None,
                     push_msat as i64,
-                    false, // todo set private correctly
+                    !is_announced,
                     false,
                     funding_satoshis as i64,
                     trust_zero_conf,
@@ -768,10 +781,28 @@ impl EventHandler {
                     Some(&invoice),
                 )?;
 
-                self.channel_manager
-                    .send_payment_for_bolt12_invoice(&invoice, context.as_ref())
-                    .map_err(|e| anyhow!("ERROR: Failed to send payment for invoice: {e:?}"))?;
-                Ok(())
+                let res = self
+                    .channel_manager
+                    .send_payment_for_bolt12_invoice(&invoice, context.as_ref());
+
+                // fixme: https://github.com/lightningdevkit/rust-lightning/issues/3653
+                match res {
+                    Ok(_) => Ok(()),
+                    Err(Bolt12PaymentError::DuplicateInvoice) => {
+                        log_info!(
+                            self.logger,
+                            "EVENT: InvoiceReceived, duplicate invoice, skipping..."
+                        );
+                        Ok(())
+                    }
+                    Err(e) => {
+                        log_error!(
+                            self.logger,
+                            "ERROR: InvoiceReceived, failed to send payment: {e:?}"
+                        );
+                        Err(anyhow!("Failed to send payment for invoice: {e:?}"))
+                    }
+                }
             }
             Event::OnionMessageIntercepted { .. } => {
                 log_debug!(self.logger, "EVENT: OnionMessageIntercepted");

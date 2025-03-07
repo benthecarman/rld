@@ -35,10 +35,7 @@ impl TxBroadcaster {
 impl BroadcasterInterface for TxBroadcaster {
     fn broadcast_transactions(&self, txs: &[&Transaction]) {
         // encode txs to hex
-        let txn = txs
-            .iter()
-            .map(|tx| encode::serialize_hex(tx))
-            .collect::<Vec<_>>();
+        let txn = txs.iter().map(encode::serialize_hex).collect::<Vec<_>>();
 
         let tx_json: serde_json::Value;
         let res = if txn.len() == 1 {

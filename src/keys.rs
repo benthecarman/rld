@@ -7,14 +7,14 @@ use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{Network, ScriptBuf, Transaction, TxOut};
+use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::log_trace;
 use lightning::offers::invoice::UnsignedBolt12Invoice;
-use lightning::offers::invoice_request::UnsignedInvoiceRequest;
 use lightning::sign::{
-    EntropySource, InMemorySigner, KeyMaterial, KeysManager as LdkKeysManager, NodeSigner,
-    OutputSpender, Recipient, SignerProvider, SpendableOutputDescriptor,
+    EntropySource, InMemorySigner, KeysManager as LdkKeysManager, NodeSigner, OutputSpender,
+    Recipient, SignerProvider, SpendableOutputDescriptor,
 };
 use lightning::util::logger::Logger;
 use lightning_invoice::RawBolt11Invoice;
@@ -88,8 +88,8 @@ impl EntropySource for KeysManager {
 }
 
 impl NodeSigner for KeysManager {
-    fn get_inbound_payment_key_material(&self) -> KeyMaterial {
-        self.inner.get_inbound_payment_key_material()
+    fn get_inbound_payment_key(&self) -> ExpandedKey {
+        self.inner.get_inbound_payment_key()
     }
 
     fn get_node_id(&self, recipient: Recipient) -> Result<PublicKey, ()> {
@@ -111,13 +111,6 @@ impl NodeSigner for KeysManager {
         recipient: Recipient,
     ) -> Result<RecoverableSignature, ()> {
         self.inner.sign_invoice(invoice, recipient)
-    }
-
-    fn sign_bolt12_invoice_request(
-        &self,
-        invoice_request: &UnsignedInvoiceRequest,
-    ) -> Result<bitcoin::secp256k1::schnorr::Signature, ()> {
-        self.inner.sign_bolt12_invoice_request(invoice_request)
     }
 
     fn sign_bolt12_invoice(

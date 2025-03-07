@@ -45,6 +45,7 @@ impl ChannelAcceptor {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChannelAcceptorResponse {
     /// Whether or not the client accepts the channel.
     pub accept: bool,

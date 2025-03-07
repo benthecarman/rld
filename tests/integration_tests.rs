@@ -123,11 +123,7 @@ async fn force_close_inbound_channel_from_rld() {
 
     let d = Description::new(String::new()).unwrap();
     let invoice = node
-        .create_invoice(
-            Bolt11InvoiceDescription::Direct(&d),
-            Some(100_000_000),
-            None,
-        )
+        .create_invoice(Bolt11InvoiceDescription::Direct(d), Some(100_000_000), None)
         .unwrap();
 
     let lightning = lnd.client.lightning();
@@ -256,11 +252,7 @@ async fn force_close_inbound_channel_from_lnd() {
 
     let d = Description::new(String::new()).unwrap();
     let invoice = node
-        .create_invoice(
-            Bolt11InvoiceDescription::Direct(&d),
-            Some(100_000_000),
-            None,
-        )
+        .create_invoice(Bolt11InvoiceDescription::Direct(d), Some(100_000_000), None)
         .unwrap();
 
     let lightning = lnd.client.lightning();
@@ -341,11 +333,19 @@ async fn bolt12_payment() {
     assert!(payment.preimage().is_some());
     assert!(payment.fee_msats().is_some());
 
-    let recvs = node1.list_receives().unwrap();
+    let recvs = node2.list_receives().unwrap();
     let recv = recvs
         .iter()
         .find(|r| r.payment_hash() == payment.payment_hash())
         .unwrap();
     assert_eq!(recv.amount_msats.unwrap(), amount_msats as i64);
     assert_eq!(recv.offer_id().unwrap(), no_amt.id());
+
+    let payments = node1.list_payments().unwrap();
+    let pay = payments
+        .iter()
+        .find(|r| r.payment_hash() == payment.payment_hash())
+        .unwrap();
+    assert_eq!(pay.amount_msats, amount_msats as i64);
+    assert!(pay.bolt12().is_some());
 }

@@ -2,9 +2,9 @@ use super::schema::payments;
 use bitcoin::secp256k1::PublicKey;
 use diesel::prelude::*;
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::PaymentHash;
 use lightning::offers::invoice::Bolt12Invoice;
 use lightning::routing::router::{BlindedTail, Path, RouteHop};
+use lightning::types::payment::PaymentHash;
 use lightning::util::ser::{Readable, Writeable};
 use lightning_invoice::Bolt11Invoice;
 use serde::{Deserialize, Serialize};
@@ -171,7 +171,7 @@ impl Payment {
         destination_pubkey: Option<PublicKey>,
         bolt11: Option<Bolt11Invoice>,
         bolt12: Option<&Bolt12Invoice>,
-    ) -> anyhow::Result<Payment> {
+    ) -> anyhow::Result<()> {
         let new = NewPayment {
             payment_id: payment_id.0.to_vec(),
             payment_hash: payment_hash.0.to_vec(),
@@ -182,9 +182,12 @@ impl Payment {
             status: PaymentStatus::Pending as i16,
         };
 
-        Ok(diesel::insert_into(payments::table)
+        diesel::insert_into(payments::table)
             .values(&new)
-            .get_result(conn)?)
+            .on_conflict_do_nothing()
+            .execute(conn)?;
+
+        Ok(())
     }
 
     pub fn payment_complete(

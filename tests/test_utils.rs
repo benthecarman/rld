@@ -1,4 +1,5 @@
 use bitcoin::bip32::Xpriv;
+use bitcoin::hex::DisplayHex;
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::rand::RngCore;
 use bitcoin::{Address, Amount, Network};
@@ -17,6 +18,8 @@ use rld::config::Config;
 use rld::logger::RldLogger;
 use rld::models::MIGRATIONS;
 use rld::node::{Node, PubkeyConnectionInfo};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::ConnectOptions;
 use std::env;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
@@ -53,6 +56,60 @@ pub fn generate_blocks(num: usize) {
     let _block_hashes = BITCOIND.client.generate_to_address(num, &address).unwrap();
 }
 
+/// Creates a test database using an existing Postgres server
+async fn create_test_db_from_url() -> anyhow::Result<String> {
+    // Generate a unique name for this test database
+    let mut seed = [0; 8];
+    OsRng.fill_bytes(&mut seed);
+    let test_db_name = format!("rld_test_{}", seed.to_lower_hex_string());
+
+    // Parse the original connection string
+    let db_url = env::var("DATABASE_URL")
+        .expect("missing DATABASE_URL")
+        .to_string();
+    let pg_options = PgConnectOptions::from_str(&db_url)?;
+
+    // Connect to the default database to create our test database
+    let pg_options_default = pg_options
+        .clone()
+        .database("postgres")
+        .log_statements(log::LevelFilter::Debug);
+
+    let default_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pg_options_default)
+        .await?;
+
+    // Create the test database
+    sqlx::query(&format!("CREATE DATABASE {}", test_db_name))
+        .execute(&default_pool)
+        .await?;
+
+    // Close the connection to the default database
+    default_pool.close().await;
+
+    // We need to parse the original URL to extract components
+    // since PgConnectOptions doesn't expose all parts we need
+    let url = url::Url::parse(&db_url)?;
+
+    // Extract password from the original URL
+    let password = url.password().unwrap_or("");
+
+    // Create connection string for the new test database
+    let test_db_url = format!(
+        "postgres://{}:{}@{}:{}/{}",
+        pg_options.get_username(),
+        password,
+        pg_options.get_host(),
+        pg_options.get_port(),
+        test_db_name
+    );
+
+    log::info!("Created test database: {test_db_url}");
+
+    Ok(test_db_url)
+}
+
 pub async fn create_rld() -> Node {
     dotenv::dotenv().ok();
     PREMINE
@@ -70,7 +127,9 @@ pub async fn create_rld() -> Node {
 
     let config = Config {
         data_dir: Some(tempdir().unwrap().into_path().to_str().unwrap().to_string()),
-        pg_url: env::var("DATABASE_URL").unwrap().to_string(),
+        pg_url: create_test_db_from_url()
+            .await
+            .expect("failed to create test db"),
         port: get_available_port().unwrap(),
         rpc_port: get_available_port().unwrap(),
         network: "regtest".to_string(),
