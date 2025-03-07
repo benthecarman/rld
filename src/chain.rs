@@ -47,22 +47,8 @@ impl BroadcasterInterface for TxBroadcaster {
             self.rpc
                 .call::<serde_json::Value>("submitpackage", &[tx_json.clone()])
         };
-        match res {
-            Ok(_) => {
-                for tx in txs {
-                    let tx = tx.to_owned().clone();
-                    let txid = tx.compute_txid();
-                    if let Err(e) = self.wallet.insert_tx(tx) {
-                        log_error!(
-                            self.logger,
-                            "Failed to insert transaction {txid} into wallet: {e}"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                log_error!(self.logger, "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {e}\nTransactions: {tx_json}");
-            }
+        if let Err(e) = res {
+            log_error!(self.logger, "Warning, failed to broadcast a transaction, this is likely okay but may indicate an error: {e}\nTransactions: {tx_json}");
         }
     }
 }

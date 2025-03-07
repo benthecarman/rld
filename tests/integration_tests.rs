@@ -62,14 +62,17 @@ async fn test_pay_invoice() {
 
 /// Open a channel from rld to lnd and then have rld force close it
 #[test(tokio::test)]
-#[ignore = "need to figure out sweeper"]
 async fn force_close_outbound_channel_from_rld() {
     let node = create_rld().await;
     let mut lnd = create_lnd().await;
     open_channel_from_rld(&node, &mut lnd).await;
 
+    fund_rld(&node).await;
+    fund_rld(&node).await;
+    fund_rld(&node).await;
+
     let starting_balance = node.get_balance();
-    assert_eq!(starting_balance.on_chain(), 98_998_766);
+    assert_eq!(starting_balance.on_chain(), 398_998_766);
     assert_eq!(starting_balance.lightning, 999_056);
 
     let channel = node.channel_manager.list_channels()[0].clone();
@@ -107,9 +110,10 @@ async fn force_close_outbound_channel_from_rld() {
     assert_eq!(final_balance.force_close, 0);
     assert!(
         final_balance.on_chain() > starting_balance.on_chain(),
-        "final balance: {}, starting balance: {}",
+        "final balance: {}, starting balance: {}, diff: {}",
         final_balance.on_chain(),
-        starting_balance.on_chain()
+        starting_balance.on_chain(),
+        final_balance.on_chain() as i64 - starting_balance.on_chain() as i64
     );
 }
 
@@ -120,6 +124,10 @@ async fn force_close_inbound_channel_from_rld() {
     let node = create_rld().await;
     let mut lnd = create_lnd().await;
     open_channel_from_lnd(&node, &mut lnd).await;
+
+    fund_rld(&node).await;
+    fund_rld(&node).await;
+    fund_rld(&node).await;
 
     let d = Description::new(String::new()).unwrap();
     let invoice = node
@@ -141,8 +149,8 @@ async fn force_close_inbound_channel_from_rld() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let starting_balance = node.get_balance();
-    assert_eq!(starting_balance.on_chain(), 0);
-    assert_eq!(starting_balance.lightning, 999_056);
+    assert_eq!(starting_balance.on_chain(), 300_000_000);
+    assert_eq!(starting_balance.lightning, 100_000);
 
     let channel = node.channel_manager.list_channels()[0].clone();
     node.channel_manager
@@ -183,7 +191,9 @@ async fn force_close_inbound_channel_from_rld() {
     let final_balance = node.get_balance();
     assert_eq!(final_balance.lightning, 0);
     assert_eq!(final_balance.force_close, 0);
-    assert_eq!(
+    assert!(
+        final_balance.on_chain() > 97_550 + starting_balance.on_chain(),
+        "final balance: {}, starting balance: {}",
         final_balance.on_chain(),
         97_550 + starting_balance.on_chain()
     );

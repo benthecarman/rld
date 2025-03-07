@@ -15,7 +15,7 @@ use bitcoin::{Address, Amount, FeeRate, Network, OutPoint, ScriptBuf, Transactio
 use bitcoincore_rpc::RpcApi;
 use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::util::logger::Logger;
-use lightning::{log_debug, log_error, log_info, log_trace, log_warn};
+use lightning::{log_debug, log_error, log_info, log_trace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ops::RangeFull;
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 /// A wallet transaction
@@ -247,35 +247,9 @@ impl OnChainWallet {
         if let Err(e) = self.fees.rpc.send_raw_transaction(&tx) {
             log_error!(self.logger, "Failed to broadcast transaction ({txid}): {e}");
             return Err(anyhow!("Failed to broadcast transaction ({txid}): {e}"));
-        } else if let Err(e) = self.insert_tx(tx) {
-            log_warn!(self.logger, "ERROR: Could not sync broadcasted tx ({txid}), will be synced in next iteration: {e:?}");
         }
 
         Ok(txid)
-    }
-
-    pub(crate) fn insert_tx(&self, tx: Transaction) -> anyhow::Result<()> {
-        let txid = tx.compute_txid();
-        // if the transaction is unconfirmed, we can just insert it
-        let mut wallet = self.wallet.try_write().unwrap();
-
-        // if we already have the transaction, we don't need to insert it
-        if wallet.get_tx(txid).is_none() {
-            let last_seen = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs();
-            // insert tx and commit changes
-            wallet.apply_unconfirmed_txs([(tx, last_seen)]);
-            let mut store = self.store.write().unwrap();
-            wallet.persist(&mut store).unwrap();
-        } else {
-            log_debug!(
-                self.logger,
-                "Tried to insert already existing transaction ({txid})",
-            )
-        }
-
-        Ok(())
     }
 
     pub fn balance(&self) -> Balance {

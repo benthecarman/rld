@@ -253,6 +253,7 @@ pub async fn get_lnd_connection_info(lnd: &mut Lnd) -> PubkeyConnectionInfo {
 }
 
 pub async fn fund_rld(rld: &Node) {
+    let start = rld.wallet.balance();
     let address = rld.wallet.get_new_address().unwrap();
 
     let amt = Amount::from_sat(100_000_000);
@@ -265,7 +266,7 @@ pub async fn fund_rld(rld: &Node) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let balance = rld.wallet.balance();
-    assert_eq!(balance.confirmed, amt);
+    assert_eq!(balance.confirmed, amt + start.confirmed);
 }
 
 pub async fn open_channel_from_rld(node: &Node, lnd: &mut Lnd) {
