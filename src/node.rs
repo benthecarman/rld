@@ -1208,11 +1208,9 @@ impl Node {
 
             let mut conn = self.db_pool.get()?;
             // We will get a channel closure event if the peer rejects the channel
-            // todo return closure reason to user
-            if let Ok(Some(_closure)) =
-                ChannelClosure::find_by_id(&mut conn, user_channel_id as i32)
+            if let Ok(Some(closure)) = ChannelClosure::find_by_id(&mut conn, user_channel_id as i32)
             {
-                anyhow::bail!("Channel creation failed");
+                anyhow::bail!("Channel creation failed, reason: {}", closure.reason);
             }
 
             let channels = self.channel_manager.list_channels_with_counterparty(pubkey);

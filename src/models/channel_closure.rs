@@ -26,7 +26,7 @@ pub struct ChannelClosure {
     pub id: i32,
     node_id: Vec<u8>,
     funding_txo: Option<String>,
-    reason: String,
+    pub reason: String,
     created_at: chrono::NaiveDateTime,
 }
 
